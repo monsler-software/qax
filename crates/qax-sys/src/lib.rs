@@ -15,6 +15,10 @@ pub enum QtWidget {}
 pub enum QtLayout {}
 pub enum QtPainter {}
 pub enum QtTranslator {}
+pub enum QtTimer {}
+pub enum QtPath {}
+pub enum QtImage {}
+pub enum QtMenu {}
 
 /// Mirrors `QtVariantKind` in `shim.h`.
 pub const QT_VK_INVALID: c_int = 0;
@@ -29,11 +33,16 @@ pub type DoubleCb = extern "C" fn(user: *mut c_void, value: c_double);
 pub type BoolCb = extern "C" fn(user: *mut c_void, value: c_int);
 pub type StrCb = extern "C" fn(user: *mut c_void, value: *const c_char);
 pub type PaintCb = extern "C" fn(user: *mut c_void, p: *mut QtPainter, w: c_int, h: c_int);
+pub type MouseCb =
+    extern "C" fn(user: *mut c_void, kind: c_int, x: c_int, y: c_int, button: c_int);
+pub type ResizeCb = extern "C" fn(user: *mut c_void, w: c_int, h: c_int);
+pub type WheelCb = extern "C" fn(user: *mut c_void, x: c_int, y: c_int, delta: c_int);
 
 unsafe extern "C" {
     // Application / event loop
     pub fn qt_app_new() -> *mut QtApp;
     pub fn qt_app_exec(app: *mut QtApp) -> c_int;
+    pub fn qt_app_run_for(app: *mut QtApp, ms: c_int) -> c_int;
     pub fn qt_app_quit(app: *mut QtApp);
     pub fn qt_app_delete(app: *mut QtApp);
 
@@ -84,9 +93,93 @@ unsafe extern "C" {
     pub fn qt_widget_update(w: *mut QtWidget);
     pub fn qt_widget_repaint(w: *mut QtWidget);
     pub fn qt_post(cb: VoidCb, user: *mut c_void);
+    pub fn qt_post_to_main(cb: VoidCb, user: *mut c_void);
 
     // Custom-drawn widget + painter
     pub fn qt_canvas_new(cb: PaintCb, user: *mut c_void) -> *mut QtWidget;
+    pub fn qt_canvas_on_mouse(w: *mut QtWidget, cb: MouseCb, user: *mut c_void, track: c_int);
+    pub fn qt_canvas_set_mouse_tracking(w: *mut QtWidget, track: c_int);
+    pub fn qt_canvas_send_mouse(w: *mut QtWidget, kind: c_int, x: c_int, y: c_int, button: c_int);
+    pub fn qt_canvas_on_resize(w: *mut QtWidget, cb: ResizeCb, user: *mut c_void);
+    pub fn qt_canvas_on_wheel(w: *mut QtWidget, cb: WheelCb, user: *mut c_void);
+
+    // Painter: state / transforms / quality
+    pub fn qt_painter_save(p: *mut QtPainter);
+    pub fn qt_painter_restore(p: *mut QtPainter);
+    pub fn qt_painter_translate(p: *mut QtPainter, dx: c_double, dy: c_double);
+    pub fn qt_painter_rotate(p: *mut QtPainter, degrees: c_double);
+    pub fn qt_painter_scale(p: *mut QtPainter, sx: c_double, sy: c_double);
+    pub fn qt_painter_set_opacity(p: *mut QtPainter, opacity: c_double);
+    pub fn qt_painter_set_antialiasing(p: *mut QtPainter, on: c_int);
+    pub fn qt_painter_set_font(p: *mut QtPainter, family: *const c_char, px: c_int, bold: c_int);
+    pub fn qt_painter_stroke_ellipse(
+        p: *mut QtPainter,
+        x: c_int, y: c_int, w: c_int, h: c_int, line: c_int,
+        r: c_int, g: c_int, b: c_int, a: c_int,
+    );
+    pub fn qt_painter_fill_rounded_rect(
+        p: *mut QtPainter,
+        x: c_int, y: c_int, w: c_int, h: c_int, rx: c_double, ry: c_double,
+        r: c_int, g: c_int, b: c_int, a: c_int,
+    );
+    pub fn qt_painter_stroke_rounded_rect(
+        p: *mut QtPainter,
+        x: c_int, y: c_int, w: c_int, h: c_int, rx: c_double, ry: c_double, line: c_int,
+        r: c_int, g: c_int, b: c_int, a: c_int,
+    );
+    pub fn qt_painter_fill_polygon(
+        p: *mut QtPainter, pts: *const c_int, n: c_int,
+        r: c_int, g: c_int, b: c_int, a: c_int,
+    );
+    pub fn qt_painter_draw_polyline(
+        p: *mut QtPainter, pts: *const c_int, n: c_int, line: c_int,
+        r: c_int, g: c_int, b: c_int, a: c_int,
+    );
+    pub fn qt_painter_fill_rect_lgrad(
+        p: *mut QtPainter,
+        x: c_int, y: c_int, w: c_int, h: c_int,
+        x1: c_double, y1: c_double, x2: c_double, y2: c_double,
+        r1: c_int, g1: c_int, b1: c_int, a1: c_int,
+        r2: c_int, g2: c_int, b2: c_int, a2: c_int,
+    );
+    pub fn qt_painter_fill_rect_rgrad(
+        p: *mut QtPainter,
+        x: c_int, y: c_int, w: c_int, h: c_int,
+        cx: c_double, cy: c_double, radius: c_double,
+        r1: c_int, g1: c_int, b1: c_int, a1: c_int,
+        r2: c_int, g2: c_int, b2: c_int, a2: c_int,
+    );
+
+    // Painter path
+    pub fn qt_path_new() -> *mut QtPath;
+    pub fn qt_path_move_to(path: *mut QtPath, x: c_double, y: c_double);
+    pub fn qt_path_line_to(path: *mut QtPath, x: c_double, y: c_double);
+    pub fn qt_path_cubic_to(
+        path: *mut QtPath,
+        c1x: c_double, c1y: c_double, c2x: c_double, c2y: c_double,
+        ex: c_double, ey: c_double,
+    );
+    pub fn qt_path_close(path: *mut QtPath);
+    pub fn qt_path_delete(path: *mut QtPath);
+    pub fn qt_painter_fill_path(
+        p: *mut QtPainter, path: *mut QtPath, r: c_int, g: c_int, b: c_int, a: c_int,
+    );
+    pub fn qt_painter_stroke_path(
+        p: *mut QtPainter, path: *mut QtPath, line: c_int,
+        r: c_int, g: c_int, b: c_int, a: c_int,
+    );
+    pub fn qt_painter_clip_path(p: *mut QtPainter, path: *mut QtPath);
+
+    // Image
+    pub fn qt_image_load(path: *const c_char) -> *mut QtImage;
+    pub fn qt_image_from_data(data: *const u8, len: c_int) -> *mut QtImage;
+    pub fn qt_image_width(i: *mut QtImage) -> c_int;
+    pub fn qt_image_height(i: *mut QtImage) -> c_int;
+    pub fn qt_image_delete(i: *mut QtImage);
+    pub fn qt_painter_draw_image(p: *mut QtPainter, i: *mut QtImage, x: c_int, y: c_int);
+    pub fn qt_painter_draw_image_scaled(
+        p: *mut QtPainter, i: *mut QtImage, x: c_int, y: c_int, w: c_int, h: c_int,
+    );
     pub fn qt_painter_fill_rect(
         p: *mut QtPainter,
         x: c_int, y: c_int, w: c_int, h: c_int,
@@ -167,6 +260,45 @@ unsafe extern "C" {
     pub fn qt_combo_box_set_current_index(w: *mut QtWidget, index: c_int);
     pub fn qt_combo_box_on_changed(w: *mut QtWidget, cb: IntCb, user: *mut c_void);
 
+    // List widget
+    pub fn qt_list_new() -> *mut QtWidget;
+    pub fn qt_list_add_item(w: *mut QtWidget, text: *const c_char);
+    pub fn qt_list_clear(w: *mut QtWidget);
+    pub fn qt_list_current_row(w: *mut QtWidget) -> c_int;
+    pub fn qt_list_set_current_row(w: *mut QtWidget, row: c_int);
+    pub fn qt_list_on_current_changed(w: *mut QtWidget, cb: IntCb, user: *mut c_void);
+    pub fn qt_list_on_activated(w: *mut QtWidget, cb: IntCb, user: *mut c_void);
+
+    // Main window + menus
+    pub fn qt_main_window_new() -> *mut QtWidget;
+    pub fn qt_main_window_set_central(mw: *mut QtWidget, central: *mut QtWidget);
+    pub fn qt_main_window_set_status(mw: *mut QtWidget, text: *const c_char);
+    pub fn qt_main_window_add_menu(mw: *mut QtWidget, title: *const c_char) -> *mut QtMenu;
+    pub fn qt_menu_add_action(menu: *mut QtMenu, text: *const c_char, cb: VoidCb, user: *mut c_void);
+    pub fn qt_menu_add_separator(menu: *mut QtMenu);
+    pub fn qt_menu_add_submenu(menu: *mut QtMenu, title: *const c_char) -> *mut QtMenu;
+
+    // Dialogs
+    pub fn qt_dialog_message(title: *const c_char, text: *const c_char);
+    pub fn qt_dialog_confirm(title: *const c_char, text: *const c_char) -> c_int;
+    pub fn qt_dialog_input(
+        title: *const c_char,
+        label: *const c_char,
+        initial: *const c_char,
+    ) -> *mut c_char;
+    pub fn qt_dialog_open_file(
+        title: *const c_char,
+        dir: *const c_char,
+        filter: *const c_char,
+    ) -> *mut c_char;
+    pub fn qt_dialog_save_file(
+        title: *const c_char,
+        dir: *const c_char,
+        filter: *const c_char,
+    ) -> *mut c_char;
+    pub fn qt_dialog_open_dir(title: *const c_char, dir: *const c_char) -> *mut c_char;
+    pub fn qt_popup_menu(items: *const *const c_char, n: c_int, x: c_int, y: c_int) -> c_int;
+
     // Radio button
     pub fn qt_radio_button_new(text: *const c_char) -> *mut QtWidget;
     pub fn qt_radio_button_set_text(w: *mut QtWidget, text: *const c_char);
@@ -206,6 +338,13 @@ unsafe extern "C" {
 
     // Separator
     pub fn qt_separator_new(vertical: c_int) -> *mut QtWidget;
+
+    // Timer
+    pub fn qt_timer_new(interval_ms: c_int, cb: VoidCb, user: *mut c_void) -> *mut QtTimer;
+    pub fn qt_timer_set_interval(t: *mut QtTimer, interval_ms: c_int);
+    pub fn qt_timer_start(t: *mut QtTimer);
+    pub fn qt_timer_stop(t: *mut QtTimer);
+    pub fn qt_timer_delete(t: *mut QtTimer);
 
     // i18n / resources
     pub fn qt_translate(context: *const c_char, source: *const c_char) -> *mut c_char;

@@ -8,13 +8,30 @@
 #include <QComboBox>
 #include <QDial>
 #include <QDoubleSpinBox>
+#include <QFont>
 #include <QFrame>
 #include <QGroupBox>
 #include <QGuiApplication>
+#include <QImage>
+#include <QFileDialog>
+#include <QInputDialog>
 #include <QLabel>
+#include <QLinearGradient>
 #include <QLineEdit>
+#include <QListWidget>
+#include <QMainWindow>
+#include <QMenu>
+#include <QMenuBar>
+#include <QMessageBox>
+#include <QMouseEvent>
+#include <QPainterPath>
 #include <QPlainTextEdit>
+#include <QPolygon>
+#include <QRadialGradient>
 #include <QRadioButton>
+#include <QResizeEvent>
+#include <QStatusBar>
+#include <QWheelEvent>
 #include <QColor>
 #include <QObject>
 #include <QPainter>
@@ -64,6 +81,23 @@ class RsCanvas : public QWidget {
 public:
     RsCanvas(QtPaintCb cb, void *user) : m_cb(cb), m_user(user) {}
 
+    // Wire up (or replace) the mouse callback and toggle hover tracking. With
+    // tracking off, move events fire only while a button is held (dragging).
+    void setMouse(QtMouseCb cb, void *user, int track) {
+        m_mouse_cb = cb;
+        m_mouse_user = user;
+        setMouseTracking(track != 0);
+    }
+    void setMouseTrack(int track) { setMouseTracking(track != 0); }
+    void setResize(QtResizeCb cb, void *user) {
+        m_resize_cb = cb;
+        m_resize_user = user;
+    }
+    void setWheel(QtWheelCb cb, void *user) {
+        m_wheel_cb = cb;
+        m_wheel_user = user;
+    }
+
 protected:
     void paintEvent(QPaintEvent *) override {
         if (!m_cb)
@@ -72,9 +106,43 @@ protected:
         m_cb(m_user, reinterpret_cast<QtPainter *>(&painter), width(), height());
     }
 
+    // kind: 0 = press, 1 = move, 2 = release. For press/release we report the
+    // single button that changed; for moves, the bitmask of buttons held.
+    void mousePressEvent(QMouseEvent *e) override { emitMouse(0, e); }
+    void mouseMoveEvent(QMouseEvent *e) override { emitMouse(1, e); }
+    void mouseReleaseEvent(QMouseEvent *e) override { emitMouse(2, e); }
+
+    void resizeEvent(QResizeEvent *) override {
+        if (m_resize_cb)
+            m_resize_cb(m_resize_user, width(), height());
+    }
+    void wheelEvent(QWheelEvent *e) override {
+        if (!m_wheel_cb)
+            return;
+        const QPointF p = e->position();
+        m_wheel_cb(m_wheel_user, static_cast<int>(p.x()),
+                   static_cast<int>(p.y()), e->angleDelta().y());
+    }
+
 private:
+    void emitMouse(int kind, QMouseEvent *e) {
+        if (!m_mouse_cb)
+            return;
+        int btn = kind == 1 ? static_cast<int>(e->buttons())
+                            : static_cast<int>(e->button());
+        const QPointF p = e->position();
+        m_mouse_cb(m_mouse_user, kind, static_cast<int>(p.x()),
+                   static_cast<int>(p.y()), btn);
+    }
+
     QtPaintCb m_cb;
     void *m_user;
+    QtMouseCb m_mouse_cb = nullptr;
+    void *m_mouse_user = nullptr;
+    QtResizeCb m_resize_cb = nullptr;
+    void *m_resize_user = nullptr;
+    QtWheelCb m_wheel_cb = nullptr;
+    void *m_wheel_user = nullptr;
 };
 
 } // namespace
@@ -88,6 +156,12 @@ QtApp *qt_app_new() {
     return reinterpret_cast<QtApp *>(new QApplication(g_argc, g_argv));
 }
 int qt_app_exec(QtApp *) { return QApplication::exec(); }
+int qt_app_run_for(QtApp *, int ms) {
+    // Run the real event loop for a bounded time, then quit. Lets timers and
+    // posted callbacks fire without blocking forever — used by tests and demos.
+    QTimer::singleShot(ms, qApp, []() { QCoreApplication::quit(); });
+    return QApplication::exec();
+}
 void qt_app_quit(QtApp *) { QApplication::quit(); }
 void qt_app_delete(QtApp *app) {
     delete reinterpret_cast<QApplication *>(app);
@@ -221,6 +295,178 @@ void qt_widget_repaint(QtWidget *w) { W(w)->repaint(); }
 QtWidget *qt_canvas_new(QtPaintCb cb, void *user) {
     return reinterpret_cast<QtWidget *>(new RsCanvas(cb, user));
 }
+void qt_canvas_on_mouse(QtWidget *w, QtMouseCb cb, void *user, int track) {
+    static_cast<RsCanvas *>(W(w))->setMouse(cb, user, track);
+}
+void qt_canvas_set_mouse_tracking(QtWidget *w, int track) {
+    static_cast<RsCanvas *>(W(w))->setMouseTrack(track);
+}
+void qt_canvas_send_mouse(QtWidget *w, int kind, int x, int y, int button) {
+    // Synthesize and deliver a mouse event straight to the widget. Used to drive
+    // canvases from tests/automation without a real pointer device.
+    QEvent::Type type = kind == 0   ? QEvent::MouseButtonPress
+                        : kind == 2 ? QEvent::MouseButtonRelease
+                                    : QEvent::MouseMove;
+    Qt::MouseButton b = button == 1   ? Qt::LeftButton
+                        : button == 2 ? Qt::RightButton
+                        : button == 4 ? Qt::MiddleButton
+                                      : Qt::NoButton;
+    QMouseEvent ev(type, QPointF(x, y), QPointF(x, y), b, b, Qt::NoModifier);
+    QCoreApplication::sendEvent(W(w), &ev);
+}
+void qt_canvas_on_resize(QtWidget *w, QtResizeCb cb, void *user) {
+    static_cast<RsCanvas *>(W(w))->setResize(cb, user);
+}
+void qt_canvas_on_wheel(QtWidget *w, QtWheelCb cb, void *user) {
+    static_cast<RsCanvas *>(W(w))->setWheel(cb, user);
+}
+
+// ---- painter: state, transforms, quality -----------------------------------
+void qt_painter_save(QtPainter *p) { P(p)->save(); }
+void qt_painter_restore(QtPainter *p) { P(p)->restore(); }
+void qt_painter_translate(QtPainter *p, double dx, double dy) {
+    P(p)->translate(dx, dy);
+}
+void qt_painter_rotate(QtPainter *p, double degrees) { P(p)->rotate(degrees); }
+void qt_painter_scale(QtPainter *p, double sx, double sy) { P(p)->scale(sx, sy); }
+void qt_painter_set_opacity(QtPainter *p, double opacity) {
+    P(p)->setOpacity(opacity);
+}
+void qt_painter_set_antialiasing(QtPainter *p, int on) {
+    P(p)->setRenderHint(QPainter::Antialiasing, on != 0);
+    P(p)->setRenderHint(QPainter::SmoothPixmapTransform, on != 0);
+}
+void qt_painter_set_font(QtPainter *p, const char *family, int px, int bold) {
+    QFont f(from_c(family), px);
+    f.setBold(bold != 0);
+    P(p)->setFont(f);
+}
+
+// ---- painter: extra shapes -------------------------------------------------
+void qt_painter_stroke_ellipse(QtPainter *p, int x, int y, int w, int h,
+                               int line, int r, int g, int b, int a) {
+    QPainter *pp = P(p);
+    QPen pen(QColor(r, g, b, a));
+    pen.setWidth(line);
+    pp->setPen(pen);
+    pp->setBrush(Qt::NoBrush);
+    pp->drawEllipse(QRect(x, y, w, h));
+}
+void qt_painter_fill_rounded_rect(QtPainter *p, int x, int y, int w, int h,
+                                  double rx, double ry, int r, int g, int b,
+                                  int a) {
+    QPainter *pp = P(p);
+    pp->setPen(Qt::NoPen);
+    pp->setBrush(QColor(r, g, b, a));
+    pp->drawRoundedRect(QRectF(x, y, w, h), rx, ry);
+}
+void qt_painter_stroke_rounded_rect(QtPainter *p, int x, int y, int w, int h,
+                                    double rx, double ry, int line, int r, int g,
+                                    int b, int a) {
+    QPainter *pp = P(p);
+    QPen pen(QColor(r, g, b, a));
+    pen.setWidth(line);
+    pp->setPen(pen);
+    pp->setBrush(Qt::NoBrush);
+    pp->drawRoundedRect(QRectF(x, y, w, h), rx, ry);
+}
+static QPolygon poly_from(const int *pts, int n) {
+    QPolygon poly;
+    poly.reserve(n);
+    for (int i = 0; i < n; ++i)
+        poly << QPoint(pts[2 * i], pts[2 * i + 1]);
+    return poly;
+}
+void qt_painter_fill_polygon(QtPainter *p, const int *pts, int n, int r, int g,
+                             int b, int a) {
+    QPainter *pp = P(p);
+    pp->setPen(Qt::NoPen);
+    pp->setBrush(QColor(r, g, b, a));
+    pp->drawPolygon(poly_from(pts, n));
+}
+void qt_painter_draw_polyline(QtPainter *p, const int *pts, int n, int line,
+                              int r, int g, int b, int a) {
+    QPainter *pp = P(p);
+    QPen pen(QColor(r, g, b, a));
+    pen.setWidth(line);
+    pp->setPen(pen);
+    pp->setBrush(Qt::NoBrush);
+    pp->drawPolyline(poly_from(pts, n));
+}
+
+// ---- painter: gradient fills -----------------------------------------------
+void qt_painter_fill_rect_lgrad(QtPainter *p, int x, int y, int w, int h,
+                                double x1, double y1, double x2, double y2,
+                                int r1, int g1, int b1, int a1, int r2, int g2,
+                                int b2, int a2) {
+    QLinearGradient grad(x1, y1, x2, y2);
+    grad.setColorAt(0.0, QColor(r1, g1, b1, a1));
+    grad.setColorAt(1.0, QColor(r2, g2, b2, a2));
+    P(p)->fillRect(QRect(x, y, w, h), QBrush(grad));
+}
+void qt_painter_fill_rect_rgrad(QtPainter *p, int x, int y, int w, int h,
+                                double cx, double cy, double radius, int r1,
+                                int g1, int b1, int a1, int r2, int g2, int b2,
+                                int a2) {
+    QRadialGradient grad(cx, cy, radius);
+    grad.setColorAt(0.0, QColor(r1, g1, b1, a1));
+    grad.setColorAt(1.0, QColor(r2, g2, b2, a2));
+    P(p)->fillRect(QRect(x, y, w, h), QBrush(grad));
+}
+
+// ---- painter path ----------------------------------------------------------
+static QPainterPath *PP(QtPath *p) { return reinterpret_cast<QPainterPath *>(p); }
+QtPath *qt_path_new() { return reinterpret_cast<QtPath *>(new QPainterPath()); }
+void qt_path_move_to(QtPath *path, double x, double y) { PP(path)->moveTo(x, y); }
+void qt_path_line_to(QtPath *path, double x, double y) { PP(path)->lineTo(x, y); }
+void qt_path_cubic_to(QtPath *path, double c1x, double c1y, double c2x,
+                      double c2y, double ex, double ey) {
+    PP(path)->cubicTo(c1x, c1y, c2x, c2y, ex, ey);
+}
+void qt_path_close(QtPath *path) { PP(path)->closeSubpath(); }
+void qt_path_delete(QtPath *path) { delete PP(path); }
+void qt_painter_fill_path(QtPainter *p, QtPath *path, int r, int g, int b,
+                          int a) {
+    P(p)->fillPath(*PP(path), QColor(r, g, b, a));
+}
+void qt_painter_stroke_path(QtPainter *p, QtPath *path, int line, int r, int g,
+                            int b, int a) {
+    QPen pen(QColor(r, g, b, a));
+    pen.setWidth(line);
+    P(p)->strokePath(*PP(path), pen);
+}
+void qt_painter_clip_path(QtPainter *p, QtPath *path) {
+    P(p)->setClipPath(*PP(path));
+}
+
+// ---- image -----------------------------------------------------------------
+static QImage *IMG(QtImage *i) { return reinterpret_cast<QImage *>(i); }
+QtImage *qt_image_load(const char *path) {
+    auto *img = new QImage();
+    if (!img->load(from_c(path))) {
+        delete img;
+        return nullptr;
+    }
+    return reinterpret_cast<QtImage *>(img);
+}
+QtImage *qt_image_from_data(const unsigned char *data, int len) {
+    auto *img = new QImage();
+    if (!img->loadFromData(data, len)) {
+        delete img;
+        return nullptr;
+    }
+    return reinterpret_cast<QtImage *>(img);
+}
+int qt_image_width(QtImage *i) { return IMG(i)->width(); }
+int qt_image_height(QtImage *i) { return IMG(i)->height(); }
+void qt_image_delete(QtImage *i) { delete IMG(i); }
+void qt_painter_draw_image(QtPainter *p, QtImage *i, int x, int y) {
+    P(p)->drawImage(QPoint(x, y), *IMG(i));
+}
+void qt_painter_draw_image_scaled(QtPainter *p, QtImage *i, int x, int y, int w,
+                                  int h) {
+    P(p)->drawImage(QRect(x, y, w, h), *IMG(i));
+}
 void qt_painter_fill_rect(QtPainter *p, int x, int y, int w, int h, int r, int g,
                           int b, int a) {
     P(p)->fillRect(QRect(x, y, w, h), QColor(r, g, b, a));
@@ -260,6 +506,13 @@ int qt_widget_block_signals(QtWidget *w, int block) {
 }
 void qt_post(QtVoidCb cb, void *user) {
     QTimer::singleShot(0, qApp, [cb, user]() { cb(user); });
+}
+void qt_post_to_main(QtVoidCb cb, void *user) {
+    // Thread-safe: schedules `cb` to run on the GUI thread. Unlike qt_post this
+    // may be called from any thread (QueuedConnection marshals across threads),
+    // so background work can feed messages back into the reactive runtime.
+    QMetaObject::invokeMethod(
+        qApp, [cb, user]() { cb(user); }, Qt::QueuedConnection);
 }
 
 QtWidget *qt_label_new(const char *text) {
@@ -440,6 +693,107 @@ void qt_combo_box_on_changed(QtWidget *w, QtIntCb cb, void *user) {
                      [cb, user](int i) { cb(user, i); });
 }
 
+// ---- list widget -----------------------------------------------------------
+QtWidget *qt_list_new() { return reinterpret_cast<QtWidget *>(new QListWidget()); }
+void qt_list_add_item(QtWidget *w, const char *text) {
+    static_cast<QListWidget *>(W(w))->addItem(from_c(text));
+}
+void qt_list_clear(QtWidget *w) { static_cast<QListWidget *>(W(w))->clear(); }
+int qt_list_current_row(QtWidget *w) {
+    return static_cast<QListWidget *>(W(w))->currentRow();
+}
+void qt_list_set_current_row(QtWidget *w, int row) {
+    static_cast<QListWidget *>(W(w))->setCurrentRow(row);
+}
+void qt_list_on_current_changed(QtWidget *w, QtIntCb cb, void *user) {
+    auto *l = static_cast<QListWidget *>(W(w));
+    QObject::connect(l, &QListWidget::currentRowChanged, l,
+                     [cb, user](int row) { cb(user, row); });
+}
+void qt_list_on_activated(QtWidget *w, QtIntCb cb, void *user) {
+    auto *l = static_cast<QListWidget *>(W(w));
+    QObject::connect(l, &QListWidget::itemActivated, l,
+                     [cb, user, l](QListWidgetItem *it) { cb(user, l->row(it)); });
+}
+
+// ---- main window + menus ---------------------------------------------------
+QtWidget *qt_main_window_new() {
+    return reinterpret_cast<QtWidget *>(new QMainWindow());
+}
+void qt_main_window_set_central(QtWidget *mw, QtWidget *central) {
+    static_cast<QMainWindow *>(W(mw))->setCentralWidget(W(central));
+}
+void qt_main_window_set_status(QtWidget *mw, const char *text) {
+    static_cast<QMainWindow *>(W(mw))->statusBar()->showMessage(from_c(text));
+}
+QtMenu *qt_main_window_add_menu(QtWidget *mw, const char *title) {
+    auto *bar = static_cast<QMainWindow *>(W(mw))->menuBar();
+    return reinterpret_cast<QtMenu *>(bar->addMenu(from_c(title)));
+}
+void qt_menu_add_action(QtMenu *menu, const char *text, QtVoidCb cb,
+                        void *user) {
+    auto *m = reinterpret_cast<QMenu *>(menu);
+    QAction *act = m->addAction(from_c(text));
+    QObject::connect(act, &QAction::triggered, act, [cb, user]() { cb(user); });
+}
+void qt_menu_add_separator(QtMenu *menu) {
+    reinterpret_cast<QMenu *>(menu)->addSeparator();
+}
+QtMenu *qt_menu_add_submenu(QtMenu *menu, const char *title) {
+    return reinterpret_cast<QtMenu *>(
+        reinterpret_cast<QMenu *>(menu)->addMenu(from_c(title)));
+}
+
+// ---- dialogs (modal, imperative) -------------------------------------------
+void qt_dialog_message(const char *title, const char *text) {
+    QMessageBox::information(nullptr, from_c(title), from_c(text));
+}
+int qt_dialog_confirm(const char *title, const char *text) {
+    auto r = QMessageBox::question(nullptr, from_c(title), from_c(text),
+                                   QMessageBox::Yes | QMessageBox::No);
+    return r == QMessageBox::Yes ? 1 : 0;
+}
+// Returns a malloc'd string (caller frees with qt_string_free) or NULL if the
+// user cancelled.
+char *qt_dialog_input(const char *title, const char *label, const char *initial) {
+    bool ok = false;
+    QString text = QInputDialog::getText(nullptr, from_c(title), from_c(label),
+                                         QLineEdit::Normal, from_c(initial), &ok);
+    return ok ? dup_c(text) : nullptr;
+}
+
+// ---- file / directory choosers (modal, imperative) -------------------------
+// Each returns a malloc'd UTF-8 path the caller frees with qt_string_free, or
+// NULL if the user cancelled. `dir` / `filter` may be NULL/empty.
+char *qt_dialog_open_file(const char *title, const char *dir,
+                          const char *filter) {
+    QString path = QFileDialog::getOpenFileName(nullptr, from_c(title),
+                                                from_c(dir), from_c(filter));
+    return path.isNull() ? nullptr : dup_c(path);
+}
+char *qt_dialog_save_file(const char *title, const char *dir,
+                          const char *filter) {
+    QString path = QFileDialog::getSaveFileName(nullptr, from_c(title),
+                                                from_c(dir), from_c(filter));
+    return path.isNull() ? nullptr : dup_c(path);
+}
+char *qt_dialog_open_dir(const char *title, const char *dir) {
+    QString path = QFileDialog::getExistingDirectory(nullptr, from_c(title),
+                                                     from_c(dir));
+    return path.isNull() ? nullptr : dup_c(path);
+}
+
+// ---- popup / context menu (modal, imperative) ------------------------------
+// Shows a menu of `items` at global (x, y) and returns the chosen 0-based index,
+// or -1 if dismissed. Handy for right-click context menus on a canvas.
+int qt_popup_menu(const char *const *items, int n, int x, int y) {
+    QMenu menu;
+    for (int i = 0; i < n; ++i)
+        menu.addAction(from_c(items[i]))->setData(i);
+    QAction *chosen = menu.exec(QPoint(x, y));
+    return chosen ? chosen->data().toInt() : -1;
+}
+
 // ---- radio button ----------------------------------------------------------
 QtWidget *qt_radio_button_new(const char *text) {
     return reinterpret_cast<QtWidget *>(new QRadioButton(from_c(text)));
@@ -540,6 +894,22 @@ QtWidget *qt_separator_new(int vertical) {
     f->setFrameShadow(QFrame::Sunken);
     return reinterpret_cast<QtWidget *>(f);
 }
+
+// ---- timer -----------------------------------------------------------------
+static QTimer *T(QtTimer *t) { return reinterpret_cast<QTimer *>(t); }
+QtTimer *qt_timer_new(int interval_ms, QtVoidCb cb, void *user) {
+    auto *t = new QTimer();
+    t->setInterval(interval_ms);
+    QObject::connect(t, &QTimer::timeout, t, [cb, user]() { cb(user); });
+    t->start();
+    return reinterpret_cast<QtTimer *>(t);
+}
+void qt_timer_set_interval(QtTimer *t, int interval_ms) {
+    T(t)->setInterval(interval_ms);
+}
+void qt_timer_start(QtTimer *t) { T(t)->start(); }
+void qt_timer_stop(QtTimer *t) { T(t)->stop(); }
+void qt_timer_delete(QtTimer *t) { delete T(t); }
 
 // ---- i18n / resources ------------------------------------------------------
 char *qt_translate(const char *context, const char *source) {

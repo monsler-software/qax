@@ -55,6 +55,7 @@
 //! ```
 
 mod app;
+pub mod dialog;
 mod engine;
 pub mod i18n;
 mod model;
@@ -71,5 +72,8 @@ pub use app::Application;
 pub use engine::QmlEngine;
 pub use model::{Fields, Model};
 pub use reactive::Property;
-pub use ui::{Canvas, Color, Component, CustomWidget, Element, Ui};
+pub use ui::{
+    Canvas, Color, Component, CustomWidget, Element, Emitter, Image, Menu, MouseButton, MouseEvent,
+    Path, Subscription, Ui, WheelEvent,
+};
 pub use value::{IntoValue, Value};

@@ -52,6 +52,9 @@ use std::ffi::{CStr, CString};
 use std::marker::PhantomData;
 use std::os::raw::{c_char, c_int, c_void};
 use std::rc::{Rc, Weak};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use qax_sys as sys;
 
@@ -126,6 +129,30 @@ extern "C" fn tramp_paint(user: *mut c_void, p: *mut sys::QtPainter, w: c_int, h
     slot.0.borrow().draw(&mut canvas);
 }
 
+/// Qt mouse-event trampoline: packs the raw ints into a [`MouseRaw`] and forwards
+/// to the canvas's mouse slot, which routes to the right handler.
+extern "C" fn tramp_mouse(user: *mut c_void, kind: c_int, x: c_int, y: c_int, button: c_int) {
+    let slot = unsafe { &*(user as *const Slot<MouseRaw>) };
+    (slot.0.borrow())(MouseRaw {
+        kind,
+        x,
+        y,
+        button,
+    });
+}
+
+/// Qt wheel-event trampoline: forwards to the canvas's wheel slot.
+extern "C" fn tramp_wheel(user: *mut c_void, x: c_int, y: c_int, delta: c_int) {
+    let slot = unsafe { &*(user as *const Slot<WheelEvent>) };
+    (slot.0.borrow())(WheelEvent { x, y, delta });
+}
+
+/// Qt resize-event trampoline: forwards the new `(w, h)` to the canvas's resize slot.
+extern "C" fn tramp_resize(user: *mut c_void, w: c_int, h: c_int) {
+    let slot = unsafe { &*(user as *const Slot<(i32, i32)>) };
+    (slot.0.borrow())((w, h));
+}
+
 /// The channel a widget's event handler uses to feed messages back to the app.
 /// Cloning is cheap (shared refs + a raw pointer) so every handler gets one.
 struct Dispatch<Msg> {
@@ -173,6 +200,56 @@ pub trait Component: 'static {
     /// Describes the UI for the current state. Called after each update batch;
     /// the returned tree is diffed against what is on screen.
     fn view(&self) -> Element<Self::Message>;
+
+    /// Declares the timers that should be running for the current state. Called
+    /// after every update batch, right after [`Component::view`]; the returned
+    /// list is diffed against the live timers **by position**, so a subscription
+    /// runs exactly as long as it stays in the list. Return an empty list (the
+    /// default) for a UI with no timers.
+    ///
+    /// Include a timer only while it should tick — e.g. drive a 60 fps animation
+    /// while playing, and drop it from the list when paused:
+    ///
+    /// ```ignore
+    /// fn subscriptions(&self) -> Vec<Subscription<Msg>> {
+    ///     if self.playing {
+    ///         vec![every(Duration::from_millis(16), Msg::Tick)]
+    ///     } else {
+    ///         vec![]
+    ///     }
+    /// }
+    /// ```
+    fn subscriptions(&self) -> Vec<Subscription<Self::Message>> {
+        Vec::new()
+    }
+}
+
+/// A running timer declared from [`Component::subscriptions`]. Build one with
+/// [`every`] (a fixed message) or [`every_with`] (a message computed per tick).
+pub struct Subscription<Msg> {
+    interval_ms: u64,
+    make: Rc<dyn Fn() -> Msg>,
+}
+
+/// Emits `msg` every `interval`. The interval is truncated to whole
+/// milliseconds (Qt's timer resolution). See [`Component::subscriptions`].
+pub fn every<Msg: Clone + 'static>(interval: Duration, msg: Msg) -> Subscription<Msg> {
+    Subscription {
+        interval_ms: interval.as_millis() as u64,
+        make: Rc::new(move || msg.clone()),
+    }
+}
+
+/// Like [`every`], but computes the message afresh on each tick — handy when it
+/// should carry a timestamp, a frame counter, or any live value.
+pub fn every_with<Msg, F>(interval: Duration, f: F) -> Subscription<Msg>
+where
+    F: Fn() -> Msg + 'static,
+{
+    Subscription {
+        interval_ms: interval.as_millis() as u64,
+        make: Rc::new(f),
+    }
 }
 
 // ===========================================================================
@@ -194,6 +271,7 @@ pub enum Element<Msg> {
     DoubleSpinBox(DoubleSpinBoxEl<Msg>),
     ProgressBar(ProgressBarEl),
     ComboBox(ComboBoxEl<Msg>),
+    List(ListEl<Msg>),
     Separator(SeparatorEl),
     Container(ContainerEl<Msg>),
     GroupBox(GroupBoxEl<Msg>),
@@ -562,6 +640,57 @@ impl<Msg> IntoElement<Msg> for ComboBoxEl<Msg> {
     }
 }
 
+/// A scrollable list of selectable rows (a playlist, a file list, …).
+/// `on_select` maps the newly-highlighted row index to a message; `on_activate`
+/// maps a double-clicked / Enter-activated row.
+pub struct ListEl<Msg> {
+    items: Vec<String>,
+    current: i32,
+    on_select: Option<Rc<dyn Fn(i32) -> Msg>>,
+    on_activate: Option<Rc<dyn Fn(i32) -> Msg>>,
+}
+pub fn list<Msg>() -> ListEl<Msg> {
+    ListEl {
+        items: Vec::new(),
+        current: -1,
+        on_select: None,
+        on_activate: None,
+    }
+}
+impl<Msg> ListEl<Msg> {
+    pub fn item(mut self, text: impl Into<String>) -> Self {
+        self.items.push(text.into());
+        self
+    }
+    pub fn items<I, S>(mut self, items: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.items.extend(items.into_iter().map(Into::into));
+        self
+    }
+    /// Sets the highlighted row (`-1` for none).
+    pub fn selected(mut self, index: i32) -> Self {
+        self.current = index;
+        self
+    }
+    pub fn on_select(mut self, f: impl Fn(i32) -> Msg + 'static) -> Self {
+        self.on_select = Some(Rc::new(f));
+        self
+    }
+    /// Fires when a row is activated (double-click or Enter).
+    pub fn on_activate(mut self, f: impl Fn(i32) -> Msg + 'static) -> Self {
+        self.on_activate = Some(Rc::new(f));
+        self
+    }
+}
+impl<Msg> IntoElement<Msg> for ListEl<Msg> {
+    fn into_element(self) -> Element<Msg> {
+        Element::List(self)
+    }
+}
+
 /// A thin dividing line. Use [`separator`] for a horizontal rule (in a column)
 /// or [`separator_v`] for a vertical one (in a row). Display only.
 pub struct SeparatorEl {
@@ -716,6 +845,60 @@ impl Color {
     }
 }
 
+/// A mouse button, as reported on a [`MouseEvent`]. `None` appears on moves that
+/// have no button held; `Other` covers extra buttons (back/forward/etc.).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MouseButton {
+    None,
+    Left,
+    Right,
+    Middle,
+    Other,
+}
+impl MouseButton {
+    // Decodes the Qt button code the shim forwards. For moves the shim sends a
+    // bitmask of held buttons; we surface the primary one (Left wins).
+    fn from_code(code: i32) -> Self {
+        match code {
+            0 => MouseButton::None,
+            _ if code & 0x1 != 0 => MouseButton::Left,   // Qt::LeftButton
+            _ if code & 0x2 != 0 => MouseButton::Right,  // Qt::RightButton
+            _ if code & 0x4 != 0 => MouseButton::Middle, // Qt::MiddleButton
+            _ => MouseButton::Other,
+        }
+    }
+}
+
+/// A mouse event delivered to a [`custom`] widget's handlers. Coordinates are
+/// widget-local pixels with the origin at the top-left — the same space
+/// [`Canvas`] draws in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MouseEvent {
+    pub x: i32,
+    pub y: i32,
+    /// On press/release, the button that changed. On move, the primary button
+    /// held (or [`MouseButton::None`] when hovering with none down).
+    pub button: MouseButton,
+}
+
+/// Raw mouse payload crossing the FFI boundary before it becomes a [`MouseEvent`].
+#[derive(Clone, Copy)]
+struct MouseRaw {
+    kind: i32,
+    x: i32,
+    y: i32,
+    button: i32,
+}
+
+/// A mouse-wheel event on a [`custom`] widget. `delta` is Qt's vertical
+/// `angleDelta().y()`: positive scrolls up/away, one notch is typically ±120.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WheelEvent {
+    pub x: i32,
+    pub y: i32,
+    pub delta: i32,
+}
+
 /// A safe drawing surface handed to [`CustomWidget::draw`]. It wraps the widget's
 /// `QPainter` for the duration of one paint; every method is a safe wrapper over
 /// the shim, so implementors never touch a raw pointer or an `unsafe` block.
@@ -780,6 +963,245 @@ impl Canvas {
             sys::qt_painter_draw_text(self.p, x, y, cs.as_ptr(), c.r as i32, c.g as i32, c.b as i32, c.a as i32)
         };
     }
+
+    // ---- state, transforms, quality --------------------------------------
+
+    /// Saves the painter state (transform, clip, opacity, font). Pair with
+    /// [`Canvas::restore`]; nesting is fine.
+    pub fn save(&mut self) {
+        unsafe { sys::qt_painter_save(self.p) };
+    }
+    /// Restores the state saved by the matching [`Canvas::save`].
+    pub fn restore(&mut self) {
+        unsafe { sys::qt_painter_restore(self.p) };
+    }
+    /// Shifts the origin by `(dx, dy)` for subsequent drawing.
+    pub fn translate(&mut self, dx: f64, dy: f64) {
+        unsafe { sys::qt_painter_translate(self.p, dx, dy) };
+    }
+    /// Rotates subsequent drawing clockwise by `degrees` about the origin.
+    pub fn rotate(&mut self, degrees: f64) {
+        unsafe { sys::qt_painter_rotate(self.p, degrees) };
+    }
+    /// Scales subsequent drawing by `(sx, sy)`.
+    pub fn scale(&mut self, sx: f64, sy: f64) {
+        unsafe { sys::qt_painter_scale(self.p, sx, sy) };
+    }
+    /// Sets the global opacity (0.0–1.0) applied to subsequent drawing.
+    pub fn set_opacity(&mut self, opacity: f64) {
+        unsafe { sys::qt_painter_set_opacity(self.p, opacity) };
+    }
+    /// Toggles antialiasing (and smooth image scaling) for subsequent drawing.
+    pub fn set_antialiasing(&mut self, on: bool) {
+        unsafe { sys::qt_painter_set_antialiasing(self.p, on as i32) };
+    }
+    /// Sets the font used by [`Canvas::text`]: family, pixel size, and weight.
+    pub fn set_font(&mut self, family: &str, px: i32, bold: bool) {
+        let f = cstr(family);
+        unsafe { sys::qt_painter_set_font(self.p, f.as_ptr(), px, bold as i32) };
+    }
+
+    // ---- extra shapes ----------------------------------------------------
+
+    /// Strokes an ellipse outline inscribed in the given rectangle.
+    pub fn stroke_ellipse(&mut self, x: i32, y: i32, w: i32, h: i32, line: i32, c: Color) {
+        unsafe {
+            sys::qt_painter_stroke_ellipse(
+                self.p, x, y, w, h, line, c.r as i32, c.g as i32, c.b as i32, c.a as i32,
+            )
+        };
+    }
+    /// Fills a rounded rectangle with corner radii `rx`/`ry`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn fill_rounded_rect(&mut self, x: i32, y: i32, w: i32, h: i32, rx: f64, ry: f64, c: Color) {
+        unsafe {
+            sys::qt_painter_fill_rounded_rect(
+                self.p, x, y, w, h, rx, ry, c.r as i32, c.g as i32, c.b as i32, c.a as i32,
+            )
+        };
+    }
+    /// Strokes a rounded rectangle outline with corner radii `rx`/`ry`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn stroke_rounded_rect(
+        &mut self, x: i32, y: i32, w: i32, h: i32, rx: f64, ry: f64, line: i32, c: Color,
+    ) {
+        unsafe {
+            sys::qt_painter_stroke_rounded_rect(
+                self.p, x, y, w, h, rx, ry, line, c.r as i32, c.g as i32, c.b as i32, c.a as i32,
+            )
+        };
+    }
+    /// Fills a closed polygon through the given points.
+    pub fn fill_polygon(&mut self, points: &[(i32, i32)], c: Color) {
+        let flat = flatten_points(points);
+        unsafe {
+            sys::qt_painter_fill_polygon(
+                self.p, flat.as_ptr(), points.len() as i32,
+                c.r as i32, c.g as i32, c.b as i32, c.a as i32,
+            )
+        };
+    }
+    /// Draws a connected series of line segments through the given points.
+    pub fn polyline(&mut self, points: &[(i32, i32)], line: i32, c: Color) {
+        let flat = flatten_points(points);
+        unsafe {
+            sys::qt_painter_draw_polyline(
+                self.p, flat.as_ptr(), points.len() as i32, line,
+                c.r as i32, c.g as i32, c.b as i32, c.a as i32,
+            )
+        };
+    }
+
+    // ---- gradients -------------------------------------------------------
+
+    /// Fills a rectangle with a linear gradient from `(x1,y1)` colour `c1` to
+    /// `(x2,y2)` colour `c2` (coordinates in the same space as the rect).
+    #[allow(clippy::too_many_arguments)]
+    pub fn fill_rect_linear(
+        &mut self, x: i32, y: i32, w: i32, h: i32,
+        x1: f64, y1: f64, c1: Color, x2: f64, y2: f64, c2: Color,
+    ) {
+        unsafe {
+            sys::qt_painter_fill_rect_lgrad(
+                self.p, x, y, w, h, x1, y1, x2, y2,
+                c1.r as i32, c1.g as i32, c1.b as i32, c1.a as i32,
+                c2.r as i32, c2.g as i32, c2.b as i32, c2.a as i32,
+            )
+        };
+    }
+    /// Fills a rectangle with a radial gradient centred at `(cx,cy)` going from
+    /// colour `inner` at the centre to `outer` at `radius`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn fill_rect_radial(
+        &mut self, x: i32, y: i32, w: i32, h: i32,
+        cx: f64, cy: f64, radius: f64, inner: Color, outer: Color,
+    ) {
+        unsafe {
+            sys::qt_painter_fill_rect_rgrad(
+                self.p, x, y, w, h, cx, cy, radius,
+                inner.r as i32, inner.g as i32, inner.b as i32, inner.a as i32,
+                outer.r as i32, outer.g as i32, outer.b as i32, outer.a as i32,
+            )
+        };
+    }
+
+    // ---- paths -----------------------------------------------------------
+
+    /// Fills a [`Path`].
+    pub fn fill_path(&mut self, path: &Path, c: Color) {
+        unsafe {
+            sys::qt_painter_fill_path(self.p, path.0, c.r as i32, c.g as i32, c.b as i32, c.a as i32)
+        };
+    }
+    /// Strokes a [`Path`] with the given pen width.
+    pub fn stroke_path(&mut self, path: &Path, line: i32, c: Color) {
+        unsafe {
+            sys::qt_painter_stroke_path(
+                self.p, path.0, line, c.r as i32, c.g as i32, c.b as i32, c.a as i32,
+            )
+        };
+    }
+    /// Clips subsequent drawing to a [`Path`]. Wrap in [`Canvas::save`] /
+    /// [`Canvas::restore`] to undo the clip.
+    pub fn clip_path(&mut self, path: &Path) {
+        unsafe { sys::qt_painter_clip_path(self.p, path.0) };
+    }
+
+    // ---- images ----------------------------------------------------------
+
+    /// Draws an [`Image`] with its top-left at `(x, y)`.
+    pub fn image(&mut self, image: &Image, x: i32, y: i32) {
+        unsafe { sys::qt_painter_draw_image(self.p, image.0, x, y) };
+    }
+    /// Draws an [`Image`] scaled to fill the given rectangle.
+    pub fn image_scaled(&mut self, image: &Image, x: i32, y: i32, w: i32, h: i32) {
+        unsafe { sys::qt_painter_draw_image_scaled(self.p, image.0, x, y, w, h) };
+    }
+}
+
+/// Flattens `(x, y)` pairs into the interleaved int array the shim expects.
+fn flatten_points(points: &[(i32, i32)]) -> Vec<i32> {
+    let mut flat = Vec::with_capacity(points.len() * 2);
+    for &(x, y) in points {
+        flat.push(x);
+        flat.push(y);
+    }
+    flat
+}
+
+/// A reusable vector path (lines and cubic Béziers) for [`Canvas::fill_path`],
+/// [`Canvas::stroke_path`], and [`Canvas::clip_path`]. Build it with the moves
+/// below; coordinates are in the canvas's pixel space.
+pub struct Path(*mut sys::QtPath);
+
+impl Path {
+    /// Creates an empty path.
+    pub fn new() -> Self {
+        Path(unsafe { sys::qt_path_new() })
+    }
+    /// Starts a new sub-path at `(x, y)`.
+    pub fn move_to(&mut self, x: f64, y: f64) -> &mut Self {
+        unsafe { sys::qt_path_move_to(self.0, x, y) };
+        self
+    }
+    /// Adds a straight line to `(x, y)`.
+    pub fn line_to(&mut self, x: f64, y: f64) -> &mut Self {
+        unsafe { sys::qt_path_line_to(self.0, x, y) };
+        self
+    }
+    /// Adds a cubic Bézier to `(ex, ey)` with control points `c1`/`c2`.
+    pub fn cubic_to(
+        &mut self, c1x: f64, c1y: f64, c2x: f64, c2y: f64, ex: f64, ey: f64,
+    ) -> &mut Self {
+        unsafe { sys::qt_path_cubic_to(self.0, c1x, c1y, c2x, c2y, ex, ey) };
+        self
+    }
+    /// Closes the current sub-path back to its start.
+    pub fn close(&mut self) -> &mut Self {
+        unsafe { sys::qt_path_close(self.0) };
+        self
+    }
+}
+
+impl Default for Path {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for Path {
+    fn drop(&mut self) {
+        unsafe { sys::qt_path_delete(self.0) };
+    }
+}
+
+/// A decoded image (holds its pixels), created once and drawn many times via
+/// [`Canvas::image`] / [`Canvas::image_scaled`]. Keep it in your widget's state
+/// rather than reloading each frame.
+pub struct Image(*mut sys::QtImage);
+
+impl Image {
+    /// Loads an image from a file path (PNG, JPEG, …). Returns `None` on failure.
+    pub fn load(path: &str) -> Option<Self> {
+        let p = cstr(path);
+        let ptr = unsafe { sys::qt_image_load(p.as_ptr()) };
+        (!ptr.is_null()).then_some(Image(ptr))
+    }
+    /// Decodes an image from encoded bytes in memory. Returns `None` on failure.
+    pub fn from_bytes(data: &[u8]) -> Option<Self> {
+        let ptr = unsafe { sys::qt_image_from_data(data.as_ptr(), data.len() as i32) };
+        (!ptr.is_null()).then_some(Image(ptr))
+    }
+    /// `(width, height)` in pixels.
+    pub fn size(&self) -> (i32, i32) {
+        unsafe { (sys::qt_image_width(self.0), sys::qt_image_height(self.0)) }
+    }
+}
+
+impl Drop for Image {
+    fn drop(&mut self) {
+        unsafe { sys::qt_image_delete(self.0) };
+    }
 }
 
 /// A custom-drawn widget: everything the built-in set doesn't cover — a spectrum
@@ -823,10 +1245,20 @@ pub trait CustomWidget: 'static {
     }
 }
 
+/// A mouse-event handler mapping a [`MouseEvent`] to a message. Shared (`Rc`) so
+/// it survives being cloned into diff closures.
+type MouseHandler<Msg> = Rc<dyn Fn(MouseEvent) -> Msg>;
+
 /// The element produced by [`custom`].
 pub struct CustomEl<Msg> {
     type_id: TypeId,
     inner: Box<dyn CustomWidget>,
+    on_down: Option<MouseHandler<Msg>>,
+    on_up: Option<MouseHandler<Msg>>,
+    on_move: Option<MouseHandler<Msg>>,
+    on_wheel: Option<Rc<dyn Fn(WheelEvent) -> Msg>>,
+    on_resize: Option<Rc<dyn Fn(i32, i32) -> Msg>>,
+    hover: bool,
     _msg: PhantomData<fn() -> Msg>,
 }
 
@@ -835,7 +1267,48 @@ pub fn custom<Msg, W: CustomWidget>(widget: W) -> CustomEl<Msg> {
     CustomEl {
         type_id: TypeId::of::<W>(),
         inner: Box::new(widget),
+        on_down: None,
+        on_up: None,
+        on_move: None,
+        on_wheel: None,
+        on_resize: None,
+        hover: false,
         _msg: PhantomData,
+    }
+}
+impl<Msg> CustomEl<Msg> {
+    /// Handles mouse-button presses over the widget.
+    pub fn on_mouse_down(mut self, f: impl Fn(MouseEvent) -> Msg + 'static) -> Self {
+        self.on_down = Some(Rc::new(f));
+        self
+    }
+    /// Handles mouse-button releases over the widget.
+    pub fn on_mouse_up(mut self, f: impl Fn(MouseEvent) -> Msg + 'static) -> Self {
+        self.on_up = Some(Rc::new(f));
+        self
+    }
+    /// Handles mouse movement. By default moves fire only while a button is held
+    /// (a drag); call [`CustomEl::hover`] to also receive moves with no button
+    /// down. On a move event, `MouseEvent::button` reports the buttons held.
+    pub fn on_mouse_move(mut self, f: impl Fn(MouseEvent) -> Msg + 'static) -> Self {
+        self.on_move = Some(Rc::new(f));
+        self
+    }
+    /// Enables hover tracking, so [`CustomEl::on_mouse_move`] also fires while no
+    /// button is held. Off by default (moves come only during a drag).
+    pub fn hover(mut self) -> Self {
+        self.hover = true;
+        self
+    }
+    /// Handles mouse-wheel scrolls over the widget (e.g. a volume knob).
+    pub fn on_wheel(mut self, f: impl Fn(WheelEvent) -> Msg + 'static) -> Self {
+        self.on_wheel = Some(Rc::new(f));
+        self
+    }
+    /// Handles the widget being resized, receiving the new `(width, height)`.
+    pub fn on_resize(mut self, f: impl Fn(i32, i32) -> Msg + 'static) -> Self {
+        self.on_resize = Some(Rc::new(f));
+        self
     }
 }
 impl<Msg> IntoElement<Msg> for CustomEl<Msg> {
@@ -916,6 +1389,13 @@ enum Mounted {
         current: i32,
         slot: *const Slot<i32>,
     },
+    List {
+        w: *mut sys::QtWidget,
+        items: Vec<String>,
+        current: i32,
+        select_slot: *const Slot<i32>,
+        activate_slot: *const Slot<i32>,
+    },
     Separator {
         w: *mut sys::QtWidget,
     },
@@ -938,6 +1418,15 @@ enum Mounted {
         /// The fixed size last applied to the canvas, so the diff can re-run the
         /// widget's `size()` hint each render and only touch Qt when it changes.
         size: Option<(i32, i32)>,
+        /// The mouse-event slot; its closure is re-pointed each render so the
+        /// handlers always produce the current state's messages.
+        mouse_slot: *const Slot<MouseRaw>,
+        /// The wheel- and resize-event slots, re-pointed each render like `mouse_slot`.
+        wheel_slot: *const Slot<WheelEvent>,
+        resize_slot: *const Slot<(i32, i32)>,
+        /// Whether hover tracking is currently on (a move handler is present),
+        /// so the diff only toggles Qt when it changes.
+        tracking: bool,
     },
     Stretch,
 }
@@ -964,6 +1453,7 @@ impl Mounted {
             | Mounted::DoubleSpinBox { w, .. }
             | Mounted::ProgressBar { w, .. }
             | Mounted::ComboBox { w, .. }
+            | Mounted::List { w, .. }
             | Mounted::Separator { w, .. }
             | Mounted::GroupBox { w, .. }
             | Mounted::Custom { w, .. } => Attach::Widget(*w),
@@ -1002,6 +1492,7 @@ fn same_kind<Msg>(m: &Mounted, e: &Element<Msg>) -> bool {
             | (Mounted::DoubleSpinBox { .. }, Element::DoubleSpinBox(_))
             | (Mounted::ProgressBar { .. }, Element::ProgressBar(_))
             | (Mounted::ComboBox { .. }, Element::ComboBox(_))
+            | (Mounted::List { .. }, Element::List(_))
             | (Mounted::Separator { .. }, Element::Separator(_))
             | (Mounted::Stretch, Element::Stretch)
     ) || matches!(
@@ -1062,6 +1553,58 @@ impl<Msg: Clone + 'static> Ctx<Msg> {
                 d.emit(f(v));
             }
         })
+    }
+    /// Builds a canvas mouse handler that routes a raw event to the matching
+    /// per-kind handler (down/move/up) and queues the resulting message.
+    fn mouse(
+        &self,
+        down: Option<MouseHandler<Msg>>,
+        up: Option<MouseHandler<Msg>>,
+        mv: Option<MouseHandler<Msg>>,
+    ) -> Box<dyn Fn(MouseRaw)> {
+        let d = self.d.clone();
+        Box::new(move |m| {
+            let handler = match m.kind {
+                0 => &down,
+                1 => &mv,
+                2 => &up,
+                _ => &None,
+            };
+            if let Some(f) = handler {
+                let ev = MouseEvent {
+                    x: m.x,
+                    y: m.y,
+                    button: MouseButton::from_code(m.button),
+                };
+                d.emit(f(ev));
+            }
+        })
+    }
+
+    /// Builds a canvas wheel handler that queues the mapped message (or nothing).
+    fn wheel(&self, h: Option<Rc<dyn Fn(WheelEvent) -> Msg>>) -> Box<dyn Fn(WheelEvent)> {
+        let d = self.d.clone();
+        Box::new(move |e| {
+            if let Some(f) = &h {
+                d.emit(f(e));
+            }
+        })
+    }
+
+    /// Builds a canvas resize handler that queues the mapped message (or nothing).
+    fn resize(&self, h: Option<Rc<dyn Fn(i32, i32) -> Msg>>) -> Box<dyn Fn((i32, i32))> {
+        let d = self.d.clone();
+        Box::new(move |(w, ht)| {
+            if let Some(f) = &h {
+                d.emit(f(w, ht));
+            }
+        })
+    }
+
+    /// A timer tick handler: each fire computes a fresh message and queues it.
+    fn tick(&self, make: Rc<dyn Fn() -> Msg>) -> Box<dyn Fn(())> {
+        let d = self.d.clone();
+        Box::new(move |()| d.emit(make()))
     }
     fn map_f64(&self, map: Option<Rc<dyn Fn(f64) -> Msg>>) -> Box<dyn Fn(f64)> {
         let d = self.d.clone();
@@ -1227,6 +1770,26 @@ fn realize<Msg: Clone + 'static>(el: Element<Msg>, ctx: &Ctx<Msg>) -> Mounted {
                 slot,
             }
         }
+        Element::List(e) => {
+            let w = unsafe { sys::qt_list_new() };
+            for it in &e.items {
+                unsafe { sys::qt_list_add_item(w, cstr(it).as_ptr()) };
+            }
+            unsafe { sys::qt_list_set_current_row(w, e.current) };
+            let select_slot = ctx.keep(ctx.map_i32(e.on_select));
+            let activate_slot = ctx.keep(ctx.map_i32(e.on_activate));
+            unsafe {
+                sys::qt_list_on_current_changed(w, tramp_int, select_slot as *mut c_void);
+                sys::qt_list_on_activated(w, tramp_int, activate_slot as *mut c_void);
+            };
+            Mounted::List {
+                w,
+                items: e.items,
+                current: e.current,
+                select_slot,
+                activate_slot,
+            }
+        }
         Element::Separator(e) => {
             let w = unsafe { sys::qt_separator_new(e.vertical as i32) };
             Mounted::Separator { w }
@@ -1238,12 +1801,27 @@ fn realize<Msg: Clone + 'static>(el: Element<Msg>, ctx: &Ctx<Msg>) -> Mounted {
             let slot = ctx.keep_canvas(e.inner);
             let w = unsafe { sys::qt_canvas_new(tramp_paint, slot as *mut c_void) };
             apply_canvas_size(w, None, size);
+            // Always attach the input slots so handlers can appear on a later
+            // render without rebuilding; tracking is opt-in via `.hover()`.
+            let tracking = e.hover;
+            let mouse_slot = ctx.keep(ctx.mouse(e.on_down, e.on_up, e.on_move));
+            let wheel_slot = ctx.keep(ctx.wheel(e.on_wheel));
+            let resize_slot = ctx.keep(ctx.resize(e.on_resize));
+            unsafe {
+                sys::qt_canvas_on_mouse(w, tramp_mouse, mouse_slot as *mut c_void, tracking as i32);
+                sys::qt_canvas_on_wheel(w, tramp_wheel, wheel_slot as *mut c_void);
+                sys::qt_canvas_on_resize(w, tramp_resize, resize_slot as *mut c_void);
+            };
             unsafe { sys::qt_widget_update(w) };
             Mounted::Custom {
                 w,
                 type_id: e.type_id,
                 slot,
                 size,
+                mouse_slot,
+                wheel_slot,
+                resize_slot,
+                tracking,
             }
         }
         Element::Stretch => Mounted::Stretch,
@@ -1498,6 +2076,35 @@ fn patch<Msg: Clone + 'static>(m: &mut Mounted, el: Element<Msg>, ctx: &Ctx<Msg>
             }
             set_slot(*slot, ctx.map_i32(e.on_change));
         }
+        (
+            Mounted::List {
+                w,
+                items,
+                current,
+                select_slot,
+                activate_slot,
+            },
+            Element::List(e),
+        ) => {
+            if *items != e.items {
+                let w = *w;
+                quietly(w, || unsafe {
+                    sys::qt_list_clear(w);
+                    for it in &e.items {
+                        sys::qt_list_add_item(w, cstr(it).as_ptr());
+                    }
+                });
+                *items = e.items;
+                *current = -2; // force the row set below (clear reset it to -1)
+            }
+            if *current != e.current {
+                let w = *w;
+                quietly(w, || unsafe { sys::qt_list_set_current_row(w, e.current) });
+                *current = e.current;
+            }
+            set_slot(*select_slot, ctx.map_i32(e.on_select));
+            set_slot(*activate_slot, ctx.map_i32(e.on_activate));
+        }
         (Mounted::Separator { .. }, Element::Separator(_)) => {}
         (Mounted::Container { layout, children, .. }, Element::Container(e)) => {
             diff_children(*layout, children, e.children, ctx);
@@ -1518,12 +2125,34 @@ fn patch<Msg: Clone + 'static>(m: &mut Mounted, el: Element<Msg>, ctx: &Ctx<Msg>
             }
             diff_children(*layout, children, e.children, ctx);
         }
-        (Mounted::Custom { w, slot, size, .. }, Element::Custom(e)) => {
+        (
+            Mounted::Custom {
+                w,
+                slot,
+                size,
+                mouse_slot,
+                wheel_slot,
+                resize_slot,
+                tracking,
+                ..
+            },
+            Element::Custom(e),
+        ) => {
             // Re-read the size hint every render: it may depend on state that
             // changed. Only touch Qt when the preferred size actually differs.
             let new_size = e.inner.size();
             apply_canvas_size(*w, *size, new_size);
             *size = new_size;
+            // Re-point the input handlers so they emit the latest messages, and
+            // toggle hover tracking only if the `.hover()` flag changed.
+            let new_tracking = e.hover;
+            set_slot(*mouse_slot, ctx.mouse(e.on_down, e.on_up, e.on_move));
+            set_slot(*wheel_slot, ctx.wheel(e.on_wheel));
+            set_slot(*resize_slot, ctx.resize(e.on_resize));
+            if *tracking != new_tracking {
+                unsafe { sys::qt_canvas_set_mouse_tracking(*w, new_tracking as i32) };
+                *tracking = new_tracking;
+            }
             // Swap the new props in behind the same canvas, then repaint.
             *unsafe { &*(*slot) }.0.borrow_mut() = e.inner;
             unsafe { sys::qt_widget_update(*w) };
@@ -1575,6 +2204,196 @@ fn diff_children<Msg: Clone + 'static>(
 }
 
 // ===========================================================================
+// Timer subscriptions: reconcile live QTimers against the declared list
+// ===========================================================================
+
+/// A live timer. Owns its callback slot behind a stable box so the raw pointer
+/// handed to Qt survives the `Vec` moving, and deletes the QTimer on drop (which
+/// also stops it), so removing a subscription tears the timer down cleanly.
+struct MountedTimer {
+    timer: *mut sys::QtTimer,
+    interval_ms: u64,
+    slot: Box<Slot<()>>,
+}
+
+impl MountedTimer {
+    fn realize<Msg: Clone + 'static>(s: Subscription<Msg>, ctx: &Ctx<Msg>) -> Self {
+        let slot = Box::new(Slot(RefCell::new(ctx.tick(s.make))));
+        let ptr: *const Slot<()> = &*slot;
+        let timer =
+            unsafe { sys::qt_timer_new(s.interval_ms as i32, tramp_void, ptr as *mut c_void) };
+        MountedTimer {
+            timer,
+            interval_ms: s.interval_ms,
+            slot,
+        }
+    }
+}
+
+impl Drop for MountedTimer {
+    fn drop(&mut self) {
+        // Delete (and stop) the QTimer before its slot box drops, so no queued
+        // tick can fire into freed state.
+        unsafe { sys::qt_timer_delete(self.timer) };
+    }
+}
+
+/// Reconciles the running timers against a fresh subscription list, positionally
+/// (mirroring [`diff_children`]): keep and re-point matching timers, drop the
+/// surplus tail, create fresh timers for any additions.
+fn diff_timers<Msg: Clone + 'static>(
+    old: &mut Vec<MountedTimer>,
+    subs: Vec<Subscription<Msg>>,
+    ctx: &Ctx<Msg>,
+) {
+    let mut subs = subs.into_iter();
+    let mut i = 0;
+    while i < old.len() {
+        match subs.next() {
+            Some(s) => {
+                if old[i].interval_ms != s.interval_ms {
+                    unsafe { sys::qt_timer_set_interval(old[i].timer, s.interval_ms as i32) };
+                    old[i].interval_ms = s.interval_ms;
+                }
+                // Re-point the tick handler so it emits the latest message.
+                let slot: *const Slot<()> = &*old[i].slot;
+                set_slot(slot, ctx.tick(s.make));
+                i += 1;
+            }
+            None => break,
+        }
+    }
+    // Fewer timers now: drop the surplus (their Drop stops + deletes them).
+    old.truncate(i);
+    // More timers now: start the fresh ones.
+    for s in subs {
+        old.push(MountedTimer::realize(s, ctx));
+    }
+}
+
+// ===========================================================================
+// Async: cross-thread message emitter
+// ===========================================================================
+
+/// A thread-safe, cloneable handle for feeding messages into the UI from *other*
+/// threads — a background download, a decode worker, a `std::thread`, or a task
+/// on any async runtime. The reactive runtime itself is single-threaded (it lives
+/// on the GUI thread); an `Emitter` is the one piece that crosses the boundary.
+///
+/// Get one from [`Ui::emitter`] (after `mount`). Messages are queued and applied
+/// on the GUI thread on its next event-loop turn, exactly like a widget event, so
+/// your `update`/`view` never run off-thread. `Msg` must be [`Send`].
+///
+/// ```no_run
+/// # use qax::ui::*; use qax::Application;
+/// # #[derive(Clone)] enum Msg { Done(String) }
+/// # struct App; impl Component for App {
+/// #   type Message = Msg;
+/// #   fn update(&mut self, _m: Msg) {}
+/// #   fn view(&self) -> Element<Msg> { label("x").into_element() }
+/// # }
+/// # let app = Application::new();
+/// let ui = Ui::new(App).mount();
+/// let tx = ui.emitter();
+/// std::thread::spawn(move || {
+///     let data = std::fs::read_to_string("/etc/hostname").unwrap();
+///     tx.emit(Msg::Done(data)); // wakes the UI thread safely
+/// });
+/// # app.exec();
+/// ```
+pub struct Emitter<Msg> {
+    inbox: Arc<Mutex<VecDeque<Msg>>>,
+    scheduled: Arc<AtomicBool>,
+    /// Address of the leaked `Box<dyn Fn()>` drain closure (main-thread only). We
+    /// carry it as a `usize` so `Emitter` stays auto-`Send`; it is dereferenced
+    /// solely on the GUI thread inside [`tramp_flush`].
+    poke: usize,
+}
+
+impl<Msg> Clone for Emitter<Msg> {
+    fn clone(&self) -> Self {
+        Emitter {
+            inbox: self.inbox.clone(),
+            scheduled: self.scheduled.clone(),
+            poke: self.poke,
+        }
+    }
+}
+
+impl<Msg: Send + 'static> Emitter<Msg> {
+    /// Queues `msg` and wakes the GUI thread to apply it. Safe to call from any
+    /// thread. Coalesces: many rapid emits collapse into one re-render turn.
+    pub fn emit(&self, msg: Msg) {
+        self.inbox.lock().unwrap().push_back(msg);
+        // Only poke the GUI thread if a drain is not already pending.
+        if !self.scheduled.swap(true, Ordering::AcqRel) {
+            unsafe { sys::qt_post_to_main(tramp_flush, self.poke as *mut c_void) };
+        }
+    }
+}
+
+// ===========================================================================
+// Menu bar
+// ===========================================================================
+
+/// One entry in a [`Menu`]: an action that emits a message, or a separator.
+enum MenuItem<Msg> {
+    Action { text: String, msg: Msg },
+    Separator,
+}
+
+/// A top-level menu for the window's menu bar, built with [`menu`] and attached
+/// with [`Ui::menu`]. Selecting an action emits its message like any widget event.
+///
+/// ```ignore
+/// Ui::new(app)
+///     .menu(menu("File").action("Open…", Msg::Open).separator().action("Quit", Msg::Quit))
+///     .mount();
+/// ```
+pub struct Menu<Msg> {
+    title: String,
+    items: Vec<MenuItem<Msg>>,
+}
+/// Starts a menu with the given title (use `&Text` mnemonics if you like).
+pub fn menu<Msg>(title: impl Into<String>) -> Menu<Msg> {
+    Menu {
+        title: title.into(),
+        items: Vec::new(),
+    }
+}
+impl<Msg> Menu<Msg> {
+    /// Adds an action row that emits `msg` when chosen.
+    pub fn action(mut self, text: impl Into<String>, msg: Msg) -> Self {
+        self.items.push(MenuItem::Action {
+            text: text.into(),
+            msg,
+        });
+        self
+    }
+    /// Adds a separator line.
+    pub fn separator(mut self) -> Self {
+        self.items.push(MenuItem::Separator);
+        self
+    }
+}
+
+/// Builds a menu's actions into the given native `QtMenu`, wiring each action to
+/// emit its message through `ctx`.
+fn realize_menu<Msg: Clone + 'static>(native: *mut sys::QtMenu, m: Menu<Msg>, ctx: &Ctx<Msg>) {
+    for item in m.items {
+        match item {
+            MenuItem::Action { text, msg } => {
+                let slot = ctx.keep(ctx.click(Some(msg)));
+                unsafe {
+                    sys::qt_menu_add_action(native, cstr(&text).as_ptr(), tramp_void, slot as *mut c_void)
+                };
+            }
+            MenuItem::Separator => unsafe { sys::qt_menu_add_separator(native) },
+        }
+    }
+}
+
+// ===========================================================================
 // Runtime + Ui handle
 // ===========================================================================
 
@@ -1583,6 +2402,8 @@ struct Runtime<C: Component> {
     /// Always a `Mounted::Container` (the implicit root); its `children[0]` is
     /// the tree the user's `view` produced.
     root: Mounted,
+    /// Live timers declared by `subscriptions`, diffed alongside the view.
+    timers: Vec<MountedTimer>,
     ctx: Ctx<C::Message>,
 }
 
@@ -1594,6 +2415,9 @@ impl<C: Component> Runtime<C> {
             let new = vec![view];
             diff_children(*layout, children, new, &self.ctx);
         }
+        // Then reconcile timers against the current state's subscriptions.
+        let subs = self.comp.subscriptions();
+        diff_timers(&mut self.timers, subs, &self.ctx);
     }
 }
 
@@ -1601,11 +2425,23 @@ impl<C: Component> Runtime<C> {
 /// it releases every retained event slot. Create one with [`Ui::new`].
 pub struct Ui<C: Component> {
     rt: Rc<RefCell<Runtime<C>>>,
+    /// The top-level `QMainWindow`.
     window: *mut sys::QtWidget,
+    /// The central widget hosting the reactive layout (menus/status live on the
+    /// window around it).
+    central: *mut sys::QtWidget,
     // Owns the deferred-flush closure Qt posts back to; freed on drop.
     flush: *mut Box<dyn Fn()>,
+    /// Cross-thread inbox and its coalescing flag, shared with every [`Emitter`].
+    inbox: Arc<Mutex<VecDeque<C::Message>>>,
+    cross_scheduled: Arc<AtomicBool>,
+    /// The leaked drain closure emitters poke via `qt_post_to_main`. Intentionally
+    /// never reclaimed, so a late emit from a detached thread can't dangle.
+    cross_flush: *mut Box<dyn Fn()>,
     title: Option<String>,
     size: Option<(i32, i32)>,
+    menus: Vec<Menu<C::Message>>,
+    status: Option<String>,
 }
 
 impl<C: Component> Ui<C> {
@@ -1615,6 +2451,7 @@ impl<C: Component> Ui<C> {
             rt: Rc::new(RefCell::new(Runtime {
                 comp: component,
                 root: Mounted::Stretch, // placeholder, replaced in mount()
+                timers: Vec::new(),
                 ctx: Ctx {
                     // Filled in by mount(); this Dispatch is never used before then.
                     d: Dispatch {
@@ -1625,10 +2462,16 @@ impl<C: Component> Ui<C> {
                     sinks: Rc::new(RefCell::new(Vec::new())),
                 },
             })),
-            window: unsafe { sys::qt_widget_new() },
+            window: unsafe { sys::qt_main_window_new() },
+            central: unsafe { sys::qt_widget_new() },
             flush: std::ptr::null_mut(),
+            inbox: Arc::new(Mutex::new(VecDeque::new())),
+            cross_scheduled: Arc::new(AtomicBool::new(false)),
+            cross_flush: std::ptr::null_mut(),
             title: None,
             size: None,
+            menus: Vec::new(),
+            status: None,
         }
     }
 
@@ -1640,12 +2483,48 @@ impl<C: Component> Ui<C> {
         self.rt.borrow_mut().rerender();
     }
 
+    /// Reads from the current component state without mutating it. Runs `f` with
+    /// a shared borrow of the component and returns its result — handy for tests
+    /// or for pulling a value out to hand to non-reactive code.
+    pub fn state<R>(&self, f: impl FnOnce(&C) -> R) -> R {
+        f(&self.rt.borrow().comp)
+    }
+
+    /// Returns a thread-safe [`Emitter`] for feeding messages in from background
+    /// threads or async tasks. Call after [`Ui::mount`]. Requires the message
+    /// type to be [`Send`].
+    pub fn emitter(&self) -> Emitter<C::Message>
+    where
+        C::Message: Send,
+    {
+        debug_assert!(
+            !self.cross_flush.is_null(),
+            "Ui::emitter() must be called after mount()"
+        );
+        Emitter {
+            inbox: self.inbox.clone(),
+            scheduled: self.cross_scheduled.clone(),
+            poke: self.cross_flush as usize,
+        }
+    }
+
     pub fn title(mut self, title: impl Into<String>) -> Self {
         self.title = Some(title.into());
         self
     }
     pub fn size(mut self, width: i32, height: i32) -> Self {
         self.size = Some((width, height));
+        self
+    }
+    /// Adds a top-level [`Menu`] to the window's menu bar. Call once per menu, in
+    /// order; each action emits its message like any widget event.
+    pub fn menu(mut self, menu: Menu<C::Message>) -> Self {
+        self.menus.push(menu);
+        self
+    }
+    /// Sets the initial status-bar text shown at the bottom of the window.
+    pub fn status(mut self, text: impl Into<String>) -> Self {
+        self.status = Some(text.into());
         self
     }
 
@@ -1658,23 +2537,84 @@ impl<C: Component> Ui<C> {
             let rt = self.rt.borrow();
             (rt.ctx.d.queue.clone(), rt.ctx.d.scheduled.clone())
         };
+        // Re-entrancy guard shared by both flushes. A `Component::update` handler
+        // may open a modal dialog (`dialog::input`, etc.), which spins a nested Qt
+        // event loop; that loop can deliver another posted flush while we still
+        // hold `rt.borrow_mut()`. Bailing out avoids a double borrow — the queued
+        // messages are picked up by the outer drain loop once the dialog returns.
+        let in_flush = Rc::new(Cell::new(false));
         let flush: Box<dyn Fn()> = Box::new({
             let queue = queue.clone();
             let scheduled = scheduled.clone();
+            let in_flush = in_flush.clone();
             move || {
-                let Some(rt) = weak.upgrade() else { return };
-                scheduled.set(false);
-                loop {
-                    let msg = queue.borrow_mut().pop_front();
-                    let Some(msg) = msg else { break };
-                    rt.borrow_mut().comp.update(msg);
+                if in_flush.replace(true) {
+                    return;
                 }
-                rt.borrow_mut().rerender();
+                let Some(rt) = weak.upgrade() else {
+                    in_flush.set(false);
+                    return;
+                };
+                // Outer loop: a re-entrant flush (posted while a modal dialog spun
+                // a nested event loop) bailed above, leaving `scheduled` set. Keep
+                // draining until it stays clear so future `emit`s post a fresh
+                // flush instead of assuming one is already pending.
+                loop {
+                    scheduled.set(false);
+                    loop {
+                        let msg = queue.borrow_mut().pop_front();
+                        let Some(msg) = msg else { break };
+                        rt.borrow_mut().comp.update(msg);
+                    }
+                    rt.borrow_mut().rerender();
+                    if !scheduled.get() {
+                        break;
+                    }
+                }
+                in_flush.set(false);
             }
         });
         // Leak-stable pointer Qt posts back to; reclaimed in Drop.
         let flush_ptr = Box::into_raw(Box::new(flush));
         self.flush = flush_ptr;
+
+        // Cross-thread drain: applies messages that Emitters queued from other
+        // threads. Runs only on the GUI thread (poked via qt_post_to_main). Leaked
+        // deliberately — a detached thread may emit after the Ui is dropped, and
+        // this closure only no-ops (its Weak fails to upgrade) rather than dangle.
+        let cross_flush: Box<dyn Fn()> = Box::new({
+            let weak: Weak<RefCell<Runtime<C>>> = Rc::downgrade(&self.rt);
+            let inbox = self.inbox.clone();
+            let scheduled = self.cross_scheduled.clone();
+            let in_flush = in_flush.clone();
+            move || {
+                if in_flush.replace(true) {
+                    return;
+                }
+                let Some(rt) = weak.upgrade() else {
+                    scheduled.store(false, Ordering::Release);
+                    in_flush.set(false);
+                    return;
+                };
+                // Same re-entrancy discipline as the main flush: loop until the
+                // schedule flag stays clear so a message queued during a modal
+                // dialog isn't stranded with no flush pending.
+                loop {
+                    scheduled.store(false, Ordering::Release);
+                    loop {
+                        let msg = inbox.lock().unwrap().pop_front();
+                        let Some(msg) = msg else { break };
+                        rt.borrow_mut().comp.update(msg);
+                    }
+                    rt.borrow_mut().rerender();
+                    if !scheduled.load(Ordering::Acquire) {
+                        break;
+                    }
+                }
+                in_flush.set(false);
+            }
+        });
+        self.cross_flush = Box::into_raw(Box::new(cross_flush));
 
         // Now the Dispatch handlers will actually use.
         let dispatch = Dispatch {
@@ -1698,12 +2638,33 @@ impl<C: Component> Ui<C> {
             realize_container(root_el, &rt.ctx)
         };
         if let Mounted::Container { layout, .. } = &root {
-            unsafe { sys::qt_widget_set_layout(self.window, *layout) };
+            // Layout goes on the central widget; the QMainWindow hosts it plus
+            // the menu bar and status bar around it.
+            unsafe { sys::qt_widget_set_layout(self.central, *layout) };
         }
+        unsafe { sys::qt_main_window_set_central(self.window, self.central) };
         self.rt.borrow_mut().root = root;
+
+        // Build the menu bar (actions dispatch through the same runtime).
+        for m in std::mem::take(&mut self.menus) {
+            let rt = self.rt.borrow();
+            let native = unsafe { sys::qt_main_window_add_menu(self.window, cstr(&m.title).as_ptr()) };
+            realize_menu(native, m, &rt.ctx);
+        }
+
+        // Start any timers the initial state subscribes to.
+        {
+            let mut rt = self.rt.borrow_mut();
+            let subs = rt.comp.subscriptions();
+            let Runtime { timers, ctx, .. } = &mut *rt;
+            diff_timers(timers, subs, ctx);
+        }
 
         if let Some(t) = &self.title {
             unsafe { sys::qt_widget_set_window_title(self.window, cstr(t).as_ptr()) };
+        }
+        if let Some(s) = &self.status {
+            unsafe { sys::qt_main_window_set_status(self.window, cstr(s).as_ptr()) };
         }
         if let Some((w, h)) = self.size {
             unsafe { sys::qt_widget_resize(self.window, w, h) };

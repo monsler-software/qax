@@ -22,6 +22,13 @@ impl Application {
         unsafe { sys::qt_app_exec(self.ptr) }
     }
 
+    /// Runs the event loop for `ms` milliseconds, then returns. Lets timers and
+    /// posted callbacks fire without blocking indefinitely — useful for tests,
+    /// demos, or driving a short animation from a non-GUI context.
+    pub fn run_for(&self, ms: i32) -> i32 {
+        unsafe { sys::qt_app_run_for(self.ptr, ms) }
+    }
+
     /// Requests the event loop to terminate.
     pub fn quit(&self) {
         unsafe { sys::qt_app_quit(self.ptr) };

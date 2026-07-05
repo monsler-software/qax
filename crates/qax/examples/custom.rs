@@ -29,16 +29,26 @@ impl CustomWidget for Meter {
     }
 }
 
+/// The meter's fixed width (see [`Meter::size`]); handlers use it to turn a click
+/// x-coordinate into a 0.0–1.0 level.
+const METER_W: i32 = 260;
+
 /// Custom widgets stay ergonomic: expose them as a plain function returning an
-/// element, and they drop into `view` like any built-in.
-fn meter<Msg>(value: f32) -> impl IntoElement<Msg> {
+/// element, and they drop into `view` like any built-in. Here the meter is also
+/// interactive — click or drag anywhere on it to set the level, mapping the
+/// mouse x-coordinate to a fraction of its width.
+fn meter(value: f32) -> impl IntoElement<Msg> {
+    let to_level = |e: MouseEvent| Msg::SetLevel((e.x as f32 / METER_W as f32).clamp(0.0, 1.0));
     custom(Meter { value })
+        .on_mouse_down(to_level)
+        .on_mouse_move(to_level)
 }
 
 #[derive(Clone)]
 enum Msg {
     Louder,
     Quieter,
+    SetLevel(f32),
 }
 
 #[derive(Default)]
@@ -53,6 +63,7 @@ impl Component for State {
         match msg {
             Msg::Louder => self.level = (self.level + 0.1).min(1.0),
             Msg::Quieter => self.level = (self.level - 0.1).max(0.0),
+            Msg::SetLevel(v) => self.level = v,
         }
     }
 
@@ -63,6 +74,7 @@ impl Component for State {
             .child(label(tr!("Now playing")))
             .child(meter(self.level))
             .child(label(format!("{}: {:.0}%", tr!("Level"), self.level * 100.0)))
+            .child(label(tr!("Click or drag the bar to set the level")))
             .child(
                 row()
                     .spacing(8)
