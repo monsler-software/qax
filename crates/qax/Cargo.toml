@@ -7,4 +7,4 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-qax-sys = { path = "../qax-sys" }
+qax-sys = { version = "0.1.0", path = "../qax-sys" }
