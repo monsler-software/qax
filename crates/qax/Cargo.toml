@@ -5,6 +5,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+readme = "README.md"
+keywords = ["gui", "qt", "ui"]
+categories = ["gui", "api-bindings"]
+description = "High level declarative Qt6 bindings for Rust."
 
 [dependencies]
 qax-sys = { version = "0.1.0", path = "../qax-sys" }
