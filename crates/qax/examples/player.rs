@@ -170,7 +170,18 @@ impl Component for State {
             .child(
                 row()
                     .spacing(8)
-                    .child(button(if self.playing { "Pause" } else { "Play" }).on_click(Msg::TogglePlay))
+                    .child(
+                        button(if self.playing { "Pause" } else { "Play" })
+                            .on_click(Msg::TogglePlay)
+                            .default(true)
+                            .tooltip("Play / pause the track")
+                            .stylesheet(
+                                "QPushButton { background: #2d7d46; color: white; \
+                                 border: none; border-radius: 6px; padding: 6px 18px; } \
+                                 QPushButton:hover { background: #35924f; } \
+                                 QPushButton:pressed { background: #256b3b; }",
+                            ),
+                    )
                     .child(label(format!("Vol {:.0}%", self.volume * 100.0)))
                     .child(progress_bar(0, 100, (self.volume * 100.0) as i32)),
             )
@@ -206,6 +217,7 @@ fn main() {
                 .action("Save playlist…", Msg::SavePlaylist)
                 .action("Clear", Msg::ClearPlaylist)
                 .separator()
+                
                 .action("Quit", Msg::Quit),
         )
         .menu(menu("Playback").action("Play / Pause", Msg::TogglePlay))

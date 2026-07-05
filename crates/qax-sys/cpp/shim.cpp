@@ -1,5 +1,6 @@
 #include "shim.h"
 
+#include <QAbstractButton>
 #include <QApplication>
 #include <QBoxLayout>
 #include <QCoreApplication>
@@ -10,13 +11,16 @@
 #include <QDoubleSpinBox>
 #include <QFont>
 #include <QFrame>
+#include <QGridLayout>
 #include <QGroupBox>
 #include <QGuiApplication>
+#include <QIcon>
 #include <QImage>
 #include <QFileDialog>
 #include <QInputDialog>
 #include <QLabel>
 #include <QLinearGradient>
+#include <QLocale>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMainWindow>
@@ -30,6 +34,7 @@
 #include <QRadialGradient>
 #include <QRadioButton>
 #include <QResizeEvent>
+#include <QScreen>
 #include <QStatusBar>
 #include <QWheelEvent>
 #include <QColor>
@@ -69,6 +74,20 @@ char *dup_c(const QString &s) {
     std::memcpy(out, utf8.constData(), utf8.size());
     out[utf8.size()] = '\0';
     return out;
+}
+
+// Builds a QIcon from the (kind, name, fallback) triple used by every icon
+// setter in this shim. kind 0 = a file or Qt resource path (":/…"); kind 1 = a
+// name from the active desktop icon theme (freedesktop naming), with `fallback`
+// used as a path when the theme lacks the icon. An empty name yields a null icon.
+QIcon make_icon(int kind, const char *name, const char *fallback) {
+    QString n = from_c(name);
+    if (kind == 1) {
+        QString fb = from_c(fallback);
+        QIcon fbicon = fb.isEmpty() ? QIcon() : QIcon(fb);
+        return QIcon::fromTheme(n, fbicon);
+    }
+    return n.isEmpty() ? QIcon() : QIcon(n);
 }
 
 QWidget *W(QtWidget *w) { return reinterpret_cast<QWidget *>(w); }
@@ -145,6 +164,27 @@ private:
     void *m_wheel_user = nullptr;
 };
 
+// A QObject event filter that forwards a widget's close events to a Rust
+// callback. Parented to the watched widget, so it dies with it (no dangling
+// filter). eventFilter is a plain virtual override, so no moc is involved.
+class RsCloseFilter : public QObject {
+public:
+    RsCloseFilter(QtVoidCb cb, void *user, QObject *parent)
+        : QObject(parent), m_cb(cb), m_user(user) {}
+
+protected:
+    bool eventFilter(QObject *obj, QEvent *ev) override {
+        if (ev->type() == QEvent::Close && m_cb)
+            m_cb(m_user);
+        // Never veto the close; just observe it.
+        return QObject::eventFilter(obj, ev);
+    }
+
+private:
+    QtVoidCb m_cb;
+    void *m_user;
+};
+
 } // namespace
 
 extern "C" {
@@ -165,6 +205,26 @@ int qt_app_run_for(QtApp *, int ms) {
 void qt_app_quit(QtApp *) { QApplication::quit(); }
 void qt_app_delete(QtApp *app) {
     delete reinterpret_cast<QApplication *>(app);
+}
+void qt_app_set_application_name(const char *name) {
+    QCoreApplication::setApplicationName(from_c(name));
+}
+void qt_app_set_application_display_name(const char *name) {
+    QGuiApplication::setApplicationDisplayName(from_c(name));
+}
+void qt_app_set_application_version(const char *version) {
+    QCoreApplication::setApplicationVersion(from_c(version));
+}
+void qt_app_set_organization_name(const char *name) {
+    QCoreApplication::setOrganizationName(from_c(name));
+}
+void qt_app_set_organization_domain(const char *domain) {
+    QCoreApplication::setOrganizationDomain(from_c(domain));
+}
+void qt_app_set_desktop_file_name(const char *name) {
+    // On Wayland this becomes the application id used to match .desktop files
+    // (window grouping, taskbar icon). Harmless elsewhere.
+    QGuiApplication::setDesktopFileName(from_c(name));
 }
 
 // ---- QML engine ------------------------------------------------------------
@@ -288,8 +348,67 @@ void qt_widget_unset_fixed_size(QtWidget *w) {
     W(w)->setMinimumSize(0, 0);
     W(w)->setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
 }
+void qt_widget_set_fixed_width(QtWidget *w, int width) { W(w)->setFixedWidth(width); }
+void qt_widget_set_fixed_height(QtWidget *w, int height) { W(w)->setFixedHeight(height); }
+void qt_widget_unset_fixed_width(QtWidget *w) {
+    // Release a pinned width back to the layout (min 0, max unbounded), leaving
+    // any pinned height untouched.
+    W(w)->setMinimumWidth(0);
+    W(w)->setMaximumWidth(QWIDGETSIZE_MAX);
+}
+void qt_widget_unset_fixed_height(QtWidget *w) {
+    W(w)->setMinimumHeight(0);
+    W(w)->setMaximumHeight(QWIDGETSIZE_MAX);
+}
 void qt_widget_update(QtWidget *w) { W(w)->update(); }
 void qt_widget_repaint(QtWidget *w) { W(w)->repaint(); }
+void qt_widget_set_stylesheet(QtWidget *w, const char *css) {
+    W(w)->setStyleSheet(from_c(css));
+}
+void qt_widget_set_tooltip(QtWidget *w, const char *text) {
+    W(w)->setToolTip(from_c(text));
+}
+void qt_widget_set_visible(QtWidget *w, int visible) {
+    W(w)->setVisible(visible != 0);
+}
+
+// ---- window controls -------------------------------------------------------
+void qt_widget_move(QtWidget *w, int x, int y) { W(w)->move(x, y); }
+void qt_widget_set_minimum_size(QtWidget *w, int width, int height) {
+    W(w)->setMinimumSize(width, height);
+}
+void qt_widget_set_maximum_size(QtWidget *w, int width, int height) {
+    W(w)->setMaximumSize(width, height);
+}
+void qt_widget_show_normal(QtWidget *w) { W(w)->showNormal(); }
+void qt_widget_show_maximized(QtWidget *w) { W(w)->showMaximized(); }
+void qt_widget_show_minimized(QtWidget *w) { W(w)->showMinimized(); }
+void qt_widget_show_fullscreen(QtWidget *w) { W(w)->showFullScreen(); }
+void qt_widget_hide(QtWidget *w) { W(w)->hide(); }
+int qt_widget_close(QtWidget *w) { return W(w)->close() ? 1 : 0; }
+void qt_widget_on_close(QtWidget *w, QtVoidCb cb, void *user) {
+    QWidget *widget = W(w);
+    widget->installEventFilter(new RsCloseFilter(cb, user, widget));
+}
+void qt_widget_center(QtWidget *w) {
+    QScreen *screen = QGuiApplication::primaryScreen();
+    if (!screen)
+        return;
+    const QRect avail = screen->availableGeometry();
+    W(w)->move(avail.center() - W(w)->frameGeometry().center() + W(w)->pos());
+}
+void qt_widget_set_always_on_top(QtWidget *w, int on) {
+    QWidget *widget = W(w);
+    const bool visible = widget->isVisible();
+    widget->setWindowFlag(Qt::WindowStaysOnTopHint, on != 0);
+    // Toggling a window flag hides the widget; restore visibility if it was up.
+    if (visible)
+        widget->show();
+}
+void qt_widget_set_window_icon(QtWidget *w, int kind, const char *name,
+                               const char *fallback) {
+    W(w)->setWindowIcon(make_icon(kind, name, fallback));
+}
 
 // ---- custom-drawn widget ---------------------------------------------------
 QtWidget *qt_canvas_new(QtPaintCb cb, void *user) {
@@ -532,6 +651,31 @@ void qt_button_on_clicked(QtWidget *button, QtVoidCb cb, void *user) {
     auto *b = static_cast<QPushButton *>(W(button));
     QObject::connect(b, &QPushButton::clicked, b, [cb, user]() { cb(user); });
 }
+void qt_button_set_checkable(QtWidget *button, int checkable) {
+    static_cast<QPushButton *>(W(button))->setCheckable(checkable != 0);
+}
+void qt_button_set_checked(QtWidget *button, int checked) {
+    static_cast<QPushButton *>(W(button))->setChecked(checked != 0);
+}
+int qt_button_is_checked(QtWidget *button) {
+    return static_cast<QPushButton *>(W(button))->isChecked() ? 1 : 0;
+}
+void qt_button_set_flat(QtWidget *button, int flat) {
+    static_cast<QPushButton *>(W(button))->setFlat(flat != 0);
+}
+void qt_button_set_default(QtWidget *button, int is_default) {
+    static_cast<QPushButton *>(W(button))->setDefault(is_default != 0);
+}
+void qt_abstract_button_set_icon(QtWidget *button, int kind, const char *name,
+                                 const char *fallback) {
+    static_cast<QAbstractButton *>(W(button))
+        ->setIcon(make_icon(kind, name, fallback));
+}
+void qt_button_on_toggled(QtWidget *button, QtBoolCb cb, void *user) {
+    auto *b = static_cast<QPushButton *>(W(button));
+    QObject::connect(b, &QPushButton::toggled, b,
+                     [cb, user](bool on) { cb(user, on ? 1 : 0); });
+}
 
 QtLayout *qt_box_layout_new(int vertical) {
     QBoxLayout *layout = vertical
@@ -581,6 +725,19 @@ void qt_layout_clear(QtLayout *layout) {
             child->deleteLater();
         delete item;
     }
+}
+
+// ---- grid layout -----------------------------------------------------------
+QtLayout *qt_grid_layout_new() {
+    return reinterpret_cast<QtLayout *>(new QGridLayout());
+}
+void qt_grid_layout_add_widget(QtLayout *layout, QtWidget *child, int row, int col,
+                               int row_span, int col_span) {
+    static_cast<QGridLayout *>(L(layout))->addWidget(W(child), row, col, row_span, col_span);
+}
+void qt_grid_layout_add_layout(QtLayout *layout, QtLayout *child, int row, int col,
+                               int row_span, int col_span) {
+    static_cast<QGridLayout *>(L(layout))->addLayout(L(child), row, col, row_span, col_span);
 }
 
 // ---- checkbox --------------------------------------------------------------
@@ -675,8 +832,10 @@ void qt_progress_bar_set_value(QtWidget *w, int value) {
 QtWidget *qt_combo_box_new() {
     return reinterpret_cast<QtWidget *>(new QComboBox());
 }
-void qt_combo_box_add_item(QtWidget *w, const char *text) {
-    static_cast<QComboBox *>(W(w))->addItem(from_c(text));
+void qt_combo_box_add_item(QtWidget *w, int kind, const char *name,
+                           const char *fallback, const char *text) {
+    static_cast<QComboBox *>(W(w))->addItem(make_icon(kind, name, fallback),
+                                            from_c(text));
 }
 void qt_combo_box_clear(QtWidget *w) {
     static_cast<QComboBox *>(W(w))->clear();
@@ -695,8 +854,11 @@ void qt_combo_box_on_changed(QtWidget *w, QtIntCb cb, void *user) {
 
 // ---- list widget -----------------------------------------------------------
 QtWidget *qt_list_new() { return reinterpret_cast<QtWidget *>(new QListWidget()); }
-void qt_list_add_item(QtWidget *w, const char *text) {
-    static_cast<QListWidget *>(W(w))->addItem(from_c(text));
+void qt_list_add_item(QtWidget *w, int kind, const char *name,
+                      const char *fallback, const char *text) {
+    auto *item = new QListWidgetItem(make_icon(kind, name, fallback),
+                                     from_c(text));
+    static_cast<QListWidget *>(W(w))->addItem(item);
 }
 void qt_list_clear(QtWidget *w) { static_cast<QListWidget *>(W(w))->clear(); }
 int qt_list_current_row(QtWidget *w) {
@@ -729,6 +891,13 @@ void qt_main_window_set_status(QtWidget *mw, const char *text) {
 QtMenu *qt_main_window_add_menu(QtWidget *mw, const char *title) {
     auto *bar = static_cast<QMainWindow *>(W(mw))->menuBar();
     return reinterpret_cast<QtMenu *>(bar->addMenu(from_c(title)));
+}
+void qt_menu_add_action_icon(QtMenu *menu, int kind, const char *name,
+                             const char *fallback, const char *text,
+                             QtVoidCb cb, void *user) {
+    auto *m = reinterpret_cast<QMenu *>(menu);
+    QAction *act = m->addAction(make_icon(kind, name, fallback), from_c(text));
+    QObject::connect(act, &QAction::triggered, act, [cb, user]() { cb(user); });
 }
 void qt_menu_add_action(QtMenu *menu, const char *text, QtVoidCb cb,
                         void *user) {
@@ -924,9 +1093,68 @@ QtTranslator *qt_translator_load(const char *qm_path) {
     delete t;
     return nullptr;
 }
+QtTranslator *qt_translator_load_for_locale(const char *basename,
+                                            const char *directory) {
+    auto *t = new QTranslator();
+    // e.g. load("app", ":/i18n") picks ":/i18n/app_ru.qm" for a ru_RU UI.
+    if (t->load(QLocale(), from_c(basename), QStringLiteral("_"),
+                from_c(directory), QStringLiteral(".qm")) &&
+        QCoreApplication::installTranslator(t)) {
+        return reinterpret_cast<QtTranslator *>(t);
+    }
+    delete t;
+    return nullptr;
+}
 int qt_resource_register(const unsigned char *data) {
     return QResource::registerResource(data) ? 1 : 0;
 }
+
+// ---- locale ----------------------------------------------------------------
+static QLocale *LC(QtLocale *l) { return reinterpret_cast<QLocale *>(l); }
+
+QtLocale *qt_locale_system() {
+    return reinterpret_cast<QtLocale *>(new QLocale(QLocale::system()));
+}
+QtLocale *qt_locale_c() {
+    return reinterpret_cast<QtLocale *>(new QLocale(QLocale::c()));
+}
+QtLocale *qt_locale_from_name(const char *name) {
+    return reinterpret_cast<QtLocale *>(new QLocale(from_c(name)));
+}
+QtLocale *qt_locale_clone(QtLocale *l) {
+    return reinterpret_cast<QtLocale *>(new QLocale(*LC(l)));
+}
+void qt_locale_delete(QtLocale *l) { delete LC(l); }
+char *qt_locale_name(QtLocale *l) { return dup_c(LC(l)->name()); }
+char *qt_locale_bcp47_name(QtLocale *l) { return dup_c(LC(l)->bcp47Name()); }
+char *qt_locale_language_name(QtLocale *l) {
+    return dup_c(QLocale::languageToString(LC(l)->language()));
+}
+char *qt_locale_native_language_name(QtLocale *l) {
+    return dup_c(LC(l)->nativeLanguageName());
+}
+char *qt_locale_territory_name(QtLocale *l) {
+    return dup_c(QLocale::territoryToString(LC(l)->territory()));
+}
+char *qt_locale_native_territory_name(QtLocale *l) {
+    return dup_c(LC(l)->nativeTerritoryName());
+}
+char *qt_locale_decimal_point(QtLocale *l) {
+    return dup_c(LC(l)->decimalPoint());
+}
+char *qt_locale_group_separator(QtLocale *l) {
+    return dup_c(LC(l)->groupSeparator());
+}
+int qt_locale_is_rtl(QtLocale *l) {
+    return LC(l)->textDirection() == Qt::RightToLeft ? 1 : 0;
+}
+char *qt_locale_format_i64(QtLocale *l, int64_t v) {
+    return dup_c(LC(l)->toString(static_cast<qlonglong>(v)));
+}
+char *qt_locale_format_f64(QtLocale *l, double v, char fmt, int precision) {
+    return dup_c(LC(l)->toString(v, fmt, precision < 0 ? 6 : precision));
+}
+void qt_locale_set_default(QtLocale *l) { QLocale::setDefault(*LC(l)); }
 
 // ---- misc ------------------------------------------------------------------
 void qt_string_free(char *s) { std::free(s); }

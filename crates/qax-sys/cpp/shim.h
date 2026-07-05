@@ -28,6 +28,7 @@ typedef struct QtTimer QtTimer;           // erased QTimer*
 typedef struct QtPath QtPath;             // erased QPainterPath*
 typedef struct QtImage QtImage;           // erased QImage*
 typedef struct QtMenu QtMenu;             // erased QMenu*
+typedef struct QtLocale QtLocale;         // erased QLocale* (heap-allocated)
 
 // Signal callback shapes. `user` is an opaque Rust pointer round-tripped back.
 typedef void (*QtVoidCb)(void *user);
@@ -64,6 +65,13 @@ int qt_app_exec(QtApp *app);
 int qt_app_run_for(QtApp *app, int ms);
 void qt_app_quit(QtApp *app);
 void qt_app_delete(QtApp *app);
+// Application identity (Wayland app id derives from the desktop file name).
+void qt_app_set_application_name(const char *name);
+void qt_app_set_application_display_name(const char *name);
+void qt_app_set_application_version(const char *version);
+void qt_app_set_organization_name(const char *name);
+void qt_app_set_organization_domain(const char *domain);
+void qt_app_set_desktop_file_name(const char *name);
 
 // ---- QML engine (feature: qml) --------------------------------------------
 QtEngine *qt_qml_engine_new(void);
@@ -103,9 +111,44 @@ void qt_widget_set_enabled(QtWidget *w, int enabled);
 void qt_widget_set_fixed_size(QtWidget *w, int width, int height);
 // Release a fixed size set earlier, letting the layout size the widget again.
 void qt_widget_unset_fixed_size(QtWidget *w);
+// Pin one dimension only (declarative `.width()` / `.height()`); the unset
+// variants release just that dimension back to the layout.
+void qt_widget_set_fixed_width(QtWidget *w, int width);
+void qt_widget_set_fixed_height(QtWidget *w, int height);
+void qt_widget_unset_fixed_width(QtWidget *w);
+void qt_widget_unset_fixed_height(QtWidget *w);
 // Schedule / force a repaint of a widget (custom canvases repaint after diffs).
 void qt_widget_update(QtWidget *w);
 void qt_widget_repaint(QtWidget *w);
+// Apply a Qt Style Sheet (a CSS-like dialect) to a widget; it cascades to the
+// widget's children. Pass an empty string to clear any sheet set earlier.
+void qt_widget_set_stylesheet(QtWidget *w, const char *css);
+// Set (or clear, with an empty string) a widget's hover tooltip text.
+void qt_widget_set_tooltip(QtWidget *w, const char *text);
+// Show or hide a widget within its layout (hidden widgets take no space).
+void qt_widget_set_visible(QtWidget *w, int visible);
+// ---- window controls (act on a top-level widget / QMainWindow) -------------
+void qt_widget_move(QtWidget *w, int x, int y);
+void qt_widget_set_minimum_size(QtWidget *w, int width, int height);
+void qt_widget_set_maximum_size(QtWidget *w, int width, int height);
+void qt_widget_show_normal(QtWidget *w);
+void qt_widget_show_maximized(QtWidget *w);
+void qt_widget_show_minimized(QtWidget *w);
+void qt_widget_show_fullscreen(QtWidget *w);
+void qt_widget_hide(QtWidget *w);
+int qt_widget_close(QtWidget *w);
+void qt_widget_center(QtWidget *w);
+void qt_widget_set_always_on_top(QtWidget *w, int on);
+// Installs a callback fired when the widget receives a close event (the user
+// clicks the window's close button, or qt_widget_close is called). It only
+// observes — the close is never vetoed. The callback must not delete the widget
+// synchronously; defer any teardown to a later event-loop turn.
+void qt_widget_on_close(QtWidget *w, QtVoidCb cb, void *user);
+// Sets an icon built from a (kind, name, fallback) triple: kind 0 loads a file
+// or Qt resource path (":/…") given in `name`; kind 1 looks `name` up in the
+// active desktop icon theme, falling back to the `fallback` path if absent.
+void qt_widget_set_window_icon(QtWidget *w, int kind, const char *name,
+                               const char *fallback);
 
 // ---- custom-drawn widget ---------------------------------------------------
 // A QWidget whose paintEvent forwards to a Rust callback. This is how the safe
@@ -205,6 +248,21 @@ void qt_label_set_text(QtWidget *label, const char *text);
 QtWidget *qt_button_new(const char *text);
 void qt_button_set_text(QtWidget *button, const char *text);
 void qt_button_on_clicked(QtWidget *button, QtVoidCb cb, void *user);
+// Full QPushButton surface. `checkable` turns the button into a toggle; a
+// checkable button keeps a checked state and emits `toggled` when it flips.
+// `flat` draws it without a frame until hovered/pressed; `default` marks it as
+// the dialog's default action (activated by Enter).
+void qt_button_set_checkable(QtWidget *button, int checkable);
+void qt_button_set_checked(QtWidget *button, int checked);
+int qt_button_is_checked(QtWidget *button);
+void qt_button_set_flat(QtWidget *button, int flat);
+void qt_button_set_default(QtWidget *button, int is_default);
+// Sets the icon on any QAbstractButton (push button, checkbox, radio button)
+// from a (kind, name, fallback) triple; see qt_widget_set_window_icon. An empty
+// name clears the icon.
+void qt_abstract_button_set_icon(QtWidget *button, int kind, const char *name,
+                                 const char *fallback);
+void qt_button_on_toggled(QtWidget *button, QtBoolCb cb, void *user);
 
 QtLayout *qt_box_layout_new(int vertical);
 void qt_layout_add_widget(QtLayout *layout, QtWidget *child);
@@ -220,6 +278,12 @@ void qt_layout_insert_stretch(QtLayout *layout, int index);
 void qt_layout_remove_at(QtLayout *layout, int index);
 // Removes and deletes every item (and its widget) from the layout.
 void qt_layout_clear(QtLayout *layout);
+// Grid layout: children are placed at an explicit (row, col) with optional spans.
+QtLayout *qt_grid_layout_new();
+void qt_grid_layout_add_widget(QtLayout *layout, QtWidget *child, int row, int col,
+                               int row_span, int col_span);
+void qt_grid_layout_add_layout(QtLayout *layout, QtLayout *child, int row, int col,
+                               int row_span, int col_span);
 
 // ---- checkbox (feature: checkbox) -----------------------------------------
 QtWidget *qt_checkbox_new(const char *text);
@@ -253,7 +317,10 @@ void qt_progress_bar_set_value(QtWidget *w, int value);
 
 // ---- combo box (feature: combo-box) ---------------------------------------
 QtWidget *qt_combo_box_new(void);
-void qt_combo_box_add_item(QtWidget *w, const char *text);
+// Appends an item carrying an optional icon (see qt_widget_set_window_icon for
+// the kind/name/fallback triple; an empty name means no icon).
+void qt_combo_box_add_item(QtWidget *w, int kind, const char *name,
+                           const char *fallback, const char *text);
 void qt_combo_box_clear(QtWidget *w);
 int qt_combo_box_current_index(QtWidget *w);
 void qt_combo_box_set_current_index(QtWidget *w, int index);
@@ -261,7 +328,8 @@ void qt_combo_box_on_changed(QtWidget *w, QtIntCb cb, void *user);
 
 // ---- list widget (feature: list) ------------------------------------------
 QtWidget *qt_list_new(void);
-void qt_list_add_item(QtWidget *w, const char *text);
+void qt_list_add_item(QtWidget *w, int kind, const char *name,
+                      const char *fallback, const char *text);
 void qt_list_clear(QtWidget *w);
 int qt_list_current_row(QtWidget *w);
 void qt_list_set_current_row(QtWidget *w, int row);
@@ -274,6 +342,10 @@ void qt_main_window_set_central(QtWidget *mw, QtWidget *central);
 void qt_main_window_set_status(QtWidget *mw, const char *text);
 QtMenu *qt_main_window_add_menu(QtWidget *mw, const char *title);
 void qt_menu_add_action(QtMenu *menu, const char *text, QtVoidCb cb, void *user);
+// Like qt_menu_add_action but with a leading icon (kind/name/fallback triple).
+void qt_menu_add_action_icon(QtMenu *menu, int kind, const char *name,
+                             const char *fallback, const char *text,
+                             QtVoidCb cb, void *user);
 void qt_menu_add_separator(QtMenu *menu);
 QtMenu *qt_menu_add_submenu(QtMenu *menu, const char *title);
 
@@ -338,10 +410,39 @@ char *qt_translate(const char *context, const char *source);
 // Loads a compiled .qm catalogue from disk and installs it. Returns an opaque
 // translator handle (kept installed for the app's lifetime) or NULL on failure.
 QtTranslator *qt_translator_load(const char *qm_path);
+// Load a catalogue whose base name is `basename` (e.g. "app") suffixed by the
+// system UI language (":/i18n/app_ru.qm") from `directory` (a path or ":/…"
+// resource dir). Picks the best match for the current locale. NULL on failure.
+QtTranslator *qt_translator_load_for_locale(const char *basename,
+                                            const char *directory);
 // Registers an in-memory compiled resource bundle (.rcc produced by `rcc
 // --binary`), making its files visible under the `:/` virtual filesystem.
 // `data` must outlive the application. Returns non-zero on success.
 int qt_resource_register(const unsigned char *data);
+
+// ---- locale (feature: i18n) ------------------------------------------------
+// All accessors returning char* yield a malloc'd UTF-8 string the caller frees
+// with qt_string_free. Locale handles are heap-allocated; free with
+// qt_locale_delete.
+QtLocale *qt_locale_system(void);      // QLocale::system()
+QtLocale *qt_locale_c(void);           // the C locale
+QtLocale *qt_locale_from_name(const char *name); // e.g. "ru_RU", "en"
+QtLocale *qt_locale_clone(QtLocale *l);
+void qt_locale_delete(QtLocale *l);
+char *qt_locale_name(QtLocale *l);          // "ru_RU"
+char *qt_locale_bcp47_name(QtLocale *l);    // "ru-RU"
+char *qt_locale_language_name(QtLocale *l); // English name, "Russian"
+char *qt_locale_native_language_name(QtLocale *l); // "русский"
+char *qt_locale_territory_name(QtLocale *l);       // English name, "Russia"
+char *qt_locale_native_territory_name(QtLocale *l);// "Россия"
+char *qt_locale_decimal_point(QtLocale *l);
+char *qt_locale_group_separator(QtLocale *l);
+int qt_locale_is_rtl(QtLocale *l); // 1 if text direction is right-to-left
+char *qt_locale_format_i64(QtLocale *l, int64_t v);
+// `precision` < 0 uses Qt's default; `fmt` is 'f', 'e', or 'g'.
+char *qt_locale_format_f64(QtLocale *l, double v, char fmt, int precision);
+// Sets the process-wide default locale used by widgets and QString::toX.
+void qt_locale_set_default(QtLocale *l);
 
 // ---- misc ------------------------------------------------------------------
 void qt_string_free(char *s);

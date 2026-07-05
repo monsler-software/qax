@@ -10,4 +10,4 @@ categories = ["gui", "api-bindings"]
 description = "High level declarative Qt6 bindings for Rust."
 
 [dependencies]
-qax-sys = { version = "0.1.0", path = "../qax-sys" }
+qax-sys = { version = "0.1.3", path = "../qax-sys" }

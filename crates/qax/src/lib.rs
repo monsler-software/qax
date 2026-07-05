@@ -73,7 +73,7 @@ pub use engine::QmlEngine;
 pub use model::{Fields, Model};
 pub use reactive::Property;
 pub use ui::{
-    Canvas, Color, Component, CustomWidget, Element, Emitter, Image, Menu, MouseButton, MouseEvent,
-    Path, Subscription, Ui, WheelEvent,
+    Canvas, Color, Component, CustomWidget, Element, Emitter, Icon, Image, Menu, MouseButton,
+    MouseEvent, Path, Subscription, Ui, WheelEvent, WindowState,
 };
 pub use value::{IntoValue, Value};

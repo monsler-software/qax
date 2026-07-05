@@ -19,6 +19,7 @@ pub enum QtTimer {}
 pub enum QtPath {}
 pub enum QtImage {}
 pub enum QtMenu {}
+pub enum QtLocale {}
 
 /// Mirrors `QtVariantKind` in `shim.h`.
 pub const QT_VK_INVALID: c_int = 0;
@@ -45,6 +46,12 @@ unsafe extern "C" {
     pub fn qt_app_run_for(app: *mut QtApp, ms: c_int) -> c_int;
     pub fn qt_app_quit(app: *mut QtApp);
     pub fn qt_app_delete(app: *mut QtApp);
+    pub fn qt_app_set_application_name(name: *const c_char);
+    pub fn qt_app_set_application_display_name(name: *const c_char);
+    pub fn qt_app_set_application_version(version: *const c_char);
+    pub fn qt_app_set_organization_name(name: *const c_char);
+    pub fn qt_app_set_organization_domain(domain: *const c_char);
+    pub fn qt_app_set_desktop_file_name(name: *const c_char);
 
     // QML engine
     pub fn qt_qml_engine_new() -> *mut QtEngine;
@@ -90,8 +97,33 @@ unsafe extern "C" {
     pub fn qt_widget_block_signals(w: *mut QtWidget, block: c_int) -> c_int;
     pub fn qt_widget_set_fixed_size(w: *mut QtWidget, width: c_int, height: c_int);
     pub fn qt_widget_unset_fixed_size(w: *mut QtWidget);
+    pub fn qt_widget_set_fixed_width(w: *mut QtWidget, width: c_int);
+    pub fn qt_widget_set_fixed_height(w: *mut QtWidget, height: c_int);
+    pub fn qt_widget_unset_fixed_width(w: *mut QtWidget);
+    pub fn qt_widget_unset_fixed_height(w: *mut QtWidget);
     pub fn qt_widget_update(w: *mut QtWidget);
     pub fn qt_widget_repaint(w: *mut QtWidget);
+    pub fn qt_widget_set_stylesheet(w: *mut QtWidget, css: *const c_char);
+    pub fn qt_widget_set_tooltip(w: *mut QtWidget, text: *const c_char);
+    pub fn qt_widget_set_visible(w: *mut QtWidget, visible: c_int);
+    pub fn qt_widget_move(w: *mut QtWidget, x: c_int, y: c_int);
+    pub fn qt_widget_set_minimum_size(w: *mut QtWidget, width: c_int, height: c_int);
+    pub fn qt_widget_set_maximum_size(w: *mut QtWidget, width: c_int, height: c_int);
+    pub fn qt_widget_show_normal(w: *mut QtWidget);
+    pub fn qt_widget_show_maximized(w: *mut QtWidget);
+    pub fn qt_widget_show_minimized(w: *mut QtWidget);
+    pub fn qt_widget_show_fullscreen(w: *mut QtWidget);
+    pub fn qt_widget_hide(w: *mut QtWidget);
+    pub fn qt_widget_close(w: *mut QtWidget) -> c_int;
+    pub fn qt_widget_center(w: *mut QtWidget);
+    pub fn qt_widget_set_always_on_top(w: *mut QtWidget, on: c_int);
+    pub fn qt_widget_on_close(w: *mut QtWidget, cb: VoidCb, user: *mut c_void);
+    pub fn qt_widget_set_window_icon(
+        w: *mut QtWidget,
+        kind: c_int,
+        name: *const c_char,
+        fallback: *const c_char,
+    );
     pub fn qt_post(cb: VoidCb, user: *mut c_void);
     pub fn qt_post_to_main(cb: VoidCb, user: *mut c_void);
 
@@ -210,6 +242,18 @@ unsafe extern "C" {
     pub fn qt_button_new(text: *const c_char) -> *mut QtWidget;
     pub fn qt_button_set_text(button: *mut QtWidget, text: *const c_char);
     pub fn qt_button_on_clicked(button: *mut QtWidget, cb: VoidCb, user: *mut c_void);
+    pub fn qt_button_set_checkable(button: *mut QtWidget, checkable: c_int);
+    pub fn qt_button_set_checked(button: *mut QtWidget, checked: c_int);
+    pub fn qt_button_is_checked(button: *mut QtWidget) -> c_int;
+    pub fn qt_button_set_flat(button: *mut QtWidget, flat: c_int);
+    pub fn qt_button_set_default(button: *mut QtWidget, is_default: c_int);
+    pub fn qt_abstract_button_set_icon(
+        button: *mut QtWidget,
+        kind: c_int,
+        name: *const c_char,
+        fallback: *const c_char,
+    );
+    pub fn qt_button_on_toggled(button: *mut QtWidget, cb: BoolCb, user: *mut c_void);
     pub fn qt_box_layout_new(vertical: c_int) -> *mut QtLayout;
     pub fn qt_layout_add_widget(layout: *mut QtLayout, child: *mut QtWidget);
     pub fn qt_layout_add_layout(layout: *mut QtLayout, child: *mut QtLayout);
@@ -221,6 +265,23 @@ unsafe extern "C" {
     pub fn qt_layout_insert_stretch(layout: *mut QtLayout, index: c_int);
     pub fn qt_layout_remove_at(layout: *mut QtLayout, index: c_int);
     pub fn qt_layout_clear(layout: *mut QtLayout);
+    pub fn qt_grid_layout_new() -> *mut QtLayout;
+    pub fn qt_grid_layout_add_widget(
+        layout: *mut QtLayout,
+        child: *mut QtWidget,
+        row: c_int,
+        col: c_int,
+        row_span: c_int,
+        col_span: c_int,
+    );
+    pub fn qt_grid_layout_add_layout(
+        layout: *mut QtLayout,
+        child: *mut QtLayout,
+        row: c_int,
+        col: c_int,
+        row_span: c_int,
+        col_span: c_int,
+    );
 
     // Checkbox
     pub fn qt_checkbox_new(text: *const c_char) -> *mut QtWidget;
@@ -254,7 +315,13 @@ unsafe extern "C" {
 
     // Combo box
     pub fn qt_combo_box_new() -> *mut QtWidget;
-    pub fn qt_combo_box_add_item(w: *mut QtWidget, text: *const c_char);
+    pub fn qt_combo_box_add_item(
+        w: *mut QtWidget,
+        kind: c_int,
+        name: *const c_char,
+        fallback: *const c_char,
+        text: *const c_char,
+    );
     pub fn qt_combo_box_clear(w: *mut QtWidget);
     pub fn qt_combo_box_current_index(w: *mut QtWidget) -> c_int;
     pub fn qt_combo_box_set_current_index(w: *mut QtWidget, index: c_int);
@@ -262,7 +329,13 @@ unsafe extern "C" {
 
     // List widget
     pub fn qt_list_new() -> *mut QtWidget;
-    pub fn qt_list_add_item(w: *mut QtWidget, text: *const c_char);
+    pub fn qt_list_add_item(
+        w: *mut QtWidget,
+        kind: c_int,
+        name: *const c_char,
+        fallback: *const c_char,
+        text: *const c_char,
+    );
     pub fn qt_list_clear(w: *mut QtWidget);
     pub fn qt_list_current_row(w: *mut QtWidget) -> c_int;
     pub fn qt_list_set_current_row(w: *mut QtWidget, row: c_int);
@@ -275,6 +348,15 @@ unsafe extern "C" {
     pub fn qt_main_window_set_status(mw: *mut QtWidget, text: *const c_char);
     pub fn qt_main_window_add_menu(mw: *mut QtWidget, title: *const c_char) -> *mut QtMenu;
     pub fn qt_menu_add_action(menu: *mut QtMenu, text: *const c_char, cb: VoidCb, user: *mut c_void);
+    pub fn qt_menu_add_action_icon(
+        menu: *mut QtMenu,
+        kind: c_int,
+        name: *const c_char,
+        fallback: *const c_char,
+        text: *const c_char,
+        cb: VoidCb,
+        user: *mut c_void,
+    );
     pub fn qt_menu_add_separator(menu: *mut QtMenu);
     pub fn qt_menu_add_submenu(menu: *mut QtMenu, title: *const c_char) -> *mut QtMenu;
 
@@ -349,7 +431,31 @@ unsafe extern "C" {
     // i18n / resources
     pub fn qt_translate(context: *const c_char, source: *const c_char) -> *mut c_char;
     pub fn qt_translator_load(qm_path: *const c_char) -> *mut QtTranslator;
+    pub fn qt_translator_load_for_locale(
+        basename: *const c_char,
+        directory: *const c_char,
+    ) -> *mut QtTranslator;
     pub fn qt_resource_register(data: *const u8) -> c_int;
+
+    // Locale
+    pub fn qt_locale_system() -> *mut QtLocale;
+    pub fn qt_locale_c() -> *mut QtLocale;
+    pub fn qt_locale_from_name(name: *const c_char) -> *mut QtLocale;
+    pub fn qt_locale_clone(l: *mut QtLocale) -> *mut QtLocale;
+    pub fn qt_locale_delete(l: *mut QtLocale);
+    pub fn qt_locale_name(l: *mut QtLocale) -> *mut c_char;
+    pub fn qt_locale_bcp47_name(l: *mut QtLocale) -> *mut c_char;
+    pub fn qt_locale_language_name(l: *mut QtLocale) -> *mut c_char;
+    pub fn qt_locale_native_language_name(l: *mut QtLocale) -> *mut c_char;
+    pub fn qt_locale_territory_name(l: *mut QtLocale) -> *mut c_char;
+    pub fn qt_locale_native_territory_name(l: *mut QtLocale) -> *mut c_char;
+    pub fn qt_locale_decimal_point(l: *mut QtLocale) -> *mut c_char;
+    pub fn qt_locale_group_separator(l: *mut QtLocale) -> *mut c_char;
+    pub fn qt_locale_is_rtl(l: *mut QtLocale) -> c_int;
+    pub fn qt_locale_format_i64(l: *mut QtLocale, v: c_longlong) -> *mut c_char;
+    pub fn qt_locale_format_f64(l: *mut QtLocale, v: c_double, fmt: c_char, precision: c_int)
+        -> *mut c_char;
+    pub fn qt_locale_set_default(l: *mut QtLocale);
 
     // misc
     pub fn qt_string_free(s: *mut c_char);
