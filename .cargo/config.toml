@@ -1,0 +1,15 @@
+# These linker flags make the "smart component" trimming automatic — no cargo
+# features, no manual opt-in. Rust/LLVM already drop unused Rust code; combined
+# with the -ffunction-sections/-fdata-sections that qt6-sys/build.rs compiles the
+# C++ shim with:
+#
+#   --gc-sections : garbage-collect every wrapper function nothing references,
+#                   so unused widgets' glue never reaches the binary.
+#   --as-needed   : record a DT_NEEDED entry only for Qt shared libraries that
+#                   actually provide a referenced symbol. A pure-QML app that
+#                   touches no widget won't even list libQt6Widgets as a dep.
+[target.'cfg(target_os = "linux")']
+rustflags = ["-C", "link-arg=-Wl,--gc-sections", "-C", "link-arg=-Wl,--as-needed"]
+
+[target.'cfg(target_os = "macos")']
+rustflags = ["-C", "link-arg=-Wl,-dead_strip"]

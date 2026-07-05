@@ -1,0 +1,10 @@
+[package]
+name = "qax"
+description = "High-level, ergonomic Qt6 bindings for Rust (QML + code-driven components)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+qax-sys = { path = "../qax-sys" }

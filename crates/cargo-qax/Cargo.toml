@@ -1,0 +1,11 @@
+[package]
+name = "cargo-qax"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/monsler-software/qax"
+description = "Cargo subcommand for qax: extract tr!() strings into Qt .ts catalogues and compile .qrc resources."
+
+[[bin]]
+name = "cargo-qax"
+path = "src/main.rs"

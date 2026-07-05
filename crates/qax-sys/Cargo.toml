@@ -1,0 +1,12 @@
+[package]
+name = "qax-sys"
+description = "Low-level FFI glue for high-level Qt6 Rust bindings"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+links = "qaxshim"
+
+[build-dependencies]
+cc = "1.0"
+pkg-config = "0.3"
