@@ -88,11 +88,9 @@ impl Component for State {
 fn main() {
     let app = Application::new();
     // If a catalogue exists it applies automatically; otherwise the original
-    // strings are shown. Absolute path so it resolves regardless of CWD.
-    let _ru = qax::i18n::load_translation(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/translations/qax_ru.qm"
-    ));
+    // strings are shown. The `.qm` is compiled from `translations/qax_ru.ts`
+    // into OUT_DIR by build.rs (via qax-build) during `cargo build`.
+    let _ru = qax::i18n::load_translation(concat!(env!("OUT_DIR"), "/qax_ru.qm"));
     let _ui = Ui::new(State::default())
         .title(tr!("Player"))
         .size(300, 200)

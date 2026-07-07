@@ -25,7 +25,8 @@ qax/
 │   │   ├── examples/widgets.rs   # code-driven, state-driven path
 │   │   ├── examples/dynamic.rs   # a list derived from data
 │   │   └── examples/custom.rs    # custom widgets + tr! strings
-│   └── cargo-qax/        # `cargo qax` subcommand: tr! extraction + .qrc → .rcc
+│   ├── qax-build/       # build-script helper: .ts → .qm and .qrc → .rcc at build time
+│   └── cargo-qax/        # `cargo qax` subcommand: tr! extraction + one-off .qrc → .rcc
 ```
 
 ## Architecture
@@ -188,29 +189,50 @@ cargo qax i18n --lang ru,en                # writes translations/<crate>_<lang>.
 # translators fill in the .ts files, then `cargo build` compiles them to .qm
 ```
 
-The `.ts → .qm` compilation is wired into the build: `crates/qax/build.rs` runs
-`lrelease` over `translations/*.ts` on every `cargo build` (best-effort — it
-skips silently if `lrelease` isn't installed). Copy that build script into your
-own crate to get the same. At runtime:
+The `.ts → .qm` compilation (and `.qrc → .rcc`, below) is wired into the build by
+the `qax-build` helper — no copy-pasted build script. Add it as a build
+dependency and drive it from your `build.rs`:
+
+```toml
+# Cargo.toml
+[build-dependencies]
+qax-build = "0.1"
+```
 
 ```rust
-let _ru = qax::i18n::load_translation("translations/qax_ru.qm");
+// build.rs
+fn main() {
+    qax_build::Build::new()
+        .translations("translations", ["ru", "en"]) // *.ts -> OUT_DIR/*.qm
+        .resource("assets/resources.qrc")            // *.qrc -> OUT_DIR/resources.rcc
+        .run();
+}
+```
+
+`run()` compiles whatever `.ts`/`.qrc` files exist, writes the artifacts to
+`OUT_DIR`, and emits `cargo:rerun-if-changed`. It's best-effort: a checkout
+without `lrelease`/`rcc` still builds (emitting a `cargo:warning`), it just lacks
+translations/resources. `qax-build` finds Qt's tools even when they aren't on
+`PATH` (e.g. `/usr/lib/qt6/rcc` on many Linux distros). At runtime, load from
+`OUT_DIR`:
+
+```rust
+let _ru = qax::i18n::load_translation(concat!(env!("OUT_DIR"), "/qax_ru.qm"));
 let title = tr!("Now playing");
 ```
 
 ## Embedded resources
 
-Compile a `.qrc` into a binary bundle and register it from memory, so images,
-fonts and QML ship inside the executable:
-
-```sh
-cargo qax qrc assets/resources.qrc -o resources.rcc   # runs Qt's rcc
-```
+`Build::resource()` (above) compiles a `.qrc` into a binary bundle at build time;
+register it from memory so images, fonts and QML ship inside the executable:
 
 ```rust
-static RES: &[u8] = include_bytes!("../resources.rcc");
+static RES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/resources.rcc"));
 qax::i18n::register_resource(RES);   // files now reachable under :/
 ```
+
+For a one-off compile outside the build, the CLI still works:
+`cargo qax qrc assets/resources.qrc -o resources.rcc`.
 
 ## Requirements
 

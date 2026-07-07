@@ -11,3 +11,6 @@ description = "High level declarative Qt6 bindings for Rust."
 
 [dependencies]
 qax-sys = { version = "0.1.3", path = "../qax-sys" }
+
+[build-dependencies]
+qax-build = { version = "0.1.3", path = "../qax-build" }

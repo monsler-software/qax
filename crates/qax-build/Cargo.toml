@@ -1,0 +1,10 @@
+[package]
+name = "qax-build"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "../../README.md"
+keywords = ["gui", "qt", "build-dependencies", "i18n"]
+categories = ["gui", "development-tools::build-utils"]
+description = "Build-script helper for qax: compile Qt .ts translations and .qrc resources during cargo build, plus tr!() extraction for cargo-qax."

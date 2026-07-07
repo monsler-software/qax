@@ -9,3 +9,6 @@ description = "Cargo subcommand for qax: extract tr!() strings into Qt .ts catal
 [[bin]]
 name = "cargo-qax"
 path = "src/main.rs"
+
+[dependencies]
+qax-build = { version = "0.1.3", path = "../qax-build" }

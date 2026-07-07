@@ -5,6 +5,9 @@ version = 4
 [[package]]
 name = "cargo-qax"
 version = "0.1.3"
+dependencies = [
+ "qax-build",
+]
 
 [[package]]
 name = "cc"
@@ -32,8 +35,13 @@ checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
 name = "qax"
 version = "0.1.3"
 dependencies = [
+ "qax-build",
  "qax-sys",
 ]
+
+[[package]]
+name = "qax-build"
+version = "0.1.3"
 
 [[package]]
 name = "qax-sys"

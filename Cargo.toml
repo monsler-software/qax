@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/qax-sys", "crates/qax", "crates/cargo-qax"]
+members = ["crates/qax-sys", "crates/qax", "crates/qax-build", "crates/cargo-qax"]
 
 [workspace.package]
 version = "0.1.3"
