@@ -33,7 +33,7 @@ checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
 
 [[package]]
 name = "qax"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "qax-build",
  "qax-sys",
@@ -41,11 +41,11 @@ dependencies = [
 
 [[package]]
 name = "qax-build"
-version = "0.1.3"
+version = "0.1.4"
 
 [[package]]
 name = "qax-sys"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "cc",
  "pkg-config",
